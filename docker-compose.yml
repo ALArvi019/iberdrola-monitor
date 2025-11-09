@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  iberdrola-monitor:
+    build: .
+    container_name: iberdrola-monitor
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - DEVICE_ID=${DEVICE_ID:-64efc6e8-009d-4701-9039-6e793fa95d39}
+      - LATITUDE=${LATITUDE:-36.696363}
+      - LONGITUDE=${LONGITUDE:--6.162114}
+      - CHECK_INTERVAL=${CHECK_INTERVAL:-60}
+      - TZ=Europe/Madrid
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
