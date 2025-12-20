@@ -8,7 +8,7 @@ import requests
 import json
 
 class IberdrolaAPI:
-    def __init__(self, device_id="64efc6e8-009d-4701-9039-6e793fa95d39"):
+    def __init__(self, device_id):
         self.base_url = "https://eva.iberdrola.com/vecomges/api"
         self.device_id = device_id
         self.headers = {
