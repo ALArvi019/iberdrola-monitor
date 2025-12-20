@@ -17,14 +17,14 @@ class IberdrolaAPI:
             'Accept-Language': 'es-ES',
             'Authorization': '',
             'Accept-Encoding': 'gzip',
-            'versionApp': 'ANDROID-4.33.1',
+            'versionApp': 'ANDROID-4.35.0',
             'Plataforma': 'Android',
             'societyId': '1',
             'deviceid': self.device_id,
-            'deviceModel': 'samsung-pa3qxeea-SM-S938B',
+            'deviceModel': 'samsung-o1s-SM-G991B',
             'c-rid': '2d28f5-b2e-5c6-ea6-038d5f9c0',
             'darkMode': '0',
-            'User-Agent': 'Iberdrola/4.33.1/Dalvik/2.1.0 (Linux; U; Android 16; SM-S938B Build/BP2A.250605.031.A3)',
+            'User-Agent': 'Iberdrola/4.35.0/Dalvik/2.1.0 (Linux; U; Android 13; SM-G991B Build/TP1A.220624.014)',
             'Connection': 'Keep-Alive'
         }
     
