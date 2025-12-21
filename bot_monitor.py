@@ -59,6 +59,7 @@ class MonitorCargadores:
         """Retorna el teclado principal persistente"""
         keyboard = [
             [KeyboardButton("🔌 Ver Estado"), KeyboardButton("🔄 Forzar Chequeo")],
+            [KeyboardButton("📅 Reservar"), KeyboardButton("📋 Mi Reserva")],
             [KeyboardButton("⏸️ Pausar/Reanudar"), KeyboardButton("⏱️ Cambiar Intervalo")],
             [KeyboardButton("⭐ Favoritos"), KeyboardButton("ℹ️ Info")]
         ]
@@ -466,8 +467,11 @@ class MonitorCargadores:
         mensaje += "Usa los botones del teclado para interactuar:\n\n"
         mensaje += "🔌 *Ver Estado* - Estado actual\n"
         mensaje += "🔄 *Forzar Chequeo* - Escanear ahora\n"
+        mensaje += "📅 *Reservar* - Reservar cargador\n"
+        mensaje += "📋 *Mi Reserva* - Ver/cancelar reserva\n"
         mensaje += "⏸️ *Pausar/Reanudar* - Control de escaneos\n"
         mensaje += "⏱️ *Cambiar Intervalo* - Ajustar frecuencia\n"
+        mensaje += "⭐ *Favoritos* - Cargadores favoritos\n"
         mensaje += "ℹ️ *Info* - Información del sistema"
         
         await update.message.reply_text(
@@ -494,6 +498,12 @@ class MonitorCargadores:
         
         elif texto == "⭐ Favoritos":
             await self.ver_favoritos(update, context)
+        
+        elif texto == "📅 Reservar":
+            await self.iniciar_reserva(update, context)
+        
+        elif texto == "📋 Mi Reserva":
+            await self.ver_mi_reserva(update, context)
         
         elif texto == "ℹ️ Info":
             await self.mostrar_info(update, context)
@@ -678,6 +688,262 @@ class MonitorCargadores:
                 text="Usa los botones del teclado para continuar:",
                 reply_markup=self.get_main_keyboard()
             )
+        
+        # === CALLBACKS DE RESERVA ===
+        elif query.data.startswith('reserve_'):
+            # reserve_CUPRID_SOCKETID
+            parts = query.data.split('_')
+            cupr_id = int(parts[1])
+            socket_id = int(parts[2])
+            await self._ejecutar_reserva(query, cupr_id, socket_id)
+        
+        elif query.data == 'cancel_reservation':
+            await self._cancelar_reserva(query)
+    
+    async def iniciar_reserva(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Muestra los favoritos disponibles para reservar"""
+        await update.message.reply_text("⏳ Obteniendo cargadores favoritos disponibles...")
+        
+        # Verificar autenticación
+        authenticated, error = await self.ensure_authenticated()
+        if not authenticated:
+            await update.message.reply_text(
+                f"❌ *Error de autenticación*\n\n{error}",
+                parse_mode='Markdown',
+                reply_markup=self.get_main_keyboard()
+            )
+            return
+        
+        # Verificar si ya hay una reserva activa
+        transaction = self.api.get_transaction_in_progress(lat=self.latitude, lon=self.longitude)
+        if transaction and transaction.get('reservationInProgress'):
+            await update.message.reply_text(
+                "⚠️ *Ya tienes una reserva activa*\n\nUsa 📋 Mi Reserva para ver detalles o cancelar.",
+                parse_mode='Markdown',
+                reply_markup=self.get_main_keyboard()
+            )
+            return
+        
+        # Obtener favoritos
+        favoritos = self.api.obtener_favoritos(lat=self.latitude, lon=self.longitude)
+        
+        if not favoritos:
+            await update.message.reply_text(
+                "❌ No tienes cargadores favoritos o error al obtenerlos.",
+                reply_markup=self.get_main_keyboard()
+            )
+            return
+        
+        # Filtrar favoritos disponibles
+        buttons = []
+        mensaje = "📅 *RESERVAR CARGADOR*\n\n"
+        mensaje += "Selecciona un cargador disponible:\n\n"
+        
+        disponibles = 0
+        for fav in favoritos:
+            location = fav.get('locationData', {})
+            nombre = location.get('cuprName', 'Sin nombre')
+            cupr_id = location.get('cuprId')
+            status = fav.get('cpStatus', {}).get('statusCode', 'UNKNOWN')
+            
+            if status == 'AVAILABLE':
+                disponibles += 1
+                # Obtener socket disponible
+                sockets = fav.get('chargePoints', [])
+                for cp in sockets:
+                    for socket in cp.get('physicalSocket', []):
+                        socket_status = socket.get('status', {}).get('statusCode', 'UNKNOWN')
+                        if socket_status == 'AVAILABLE':
+                            socket_id = socket.get('physicalSocketId')
+                            socket_type = socket.get('socketType', {}).get('label', '')
+                            mensaje += f"✅ *{nombre}*\n   Socket {socket_id} ({socket_type})\n\n"
+                            buttons.append([
+                                InlineKeyboardButton(
+                                    f"🔌 {nombre[:25]}",
+                                    callback_data=f"reserve_{cupr_id}_{socket_id}"
+                                )
+                            ])
+                            break  # Solo un socket por cargador
+            else:
+                mensaje += f"❌ _{nombre}_ - {status}\n"
+        
+        if disponibles == 0:
+            await update.message.reply_text(
+                "❌ *No hay cargadores disponibles*\n\nTodos tus favoritos están ocupados o fuera de servicio.",
+                parse_mode='Markdown',
+                reply_markup=self.get_main_keyboard()
+            )
+            return
+        
+        mensaje += f"\n_Disponibles: {disponibles}/{len(favoritos)}_\n"
+        mensaje += "\n⚠️ *Precio de reserva: 1€* (30 min)"
+        
+        await update.message.reply_text(
+            mensaje,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+    
+    async def ver_mi_reserva(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Muestra la reserva activa del usuario"""
+        await update.message.reply_text("⏳ Consultando tu reserva...")
+        
+        # Verificar autenticación
+        authenticated, error = await self.ensure_authenticated()
+        if not authenticated:
+            await update.message.reply_text(
+                f"❌ *Error de autenticación*\n\n{error}",
+                parse_mode='Markdown',
+                reply_markup=self.get_main_keyboard()
+            )
+            return
+        
+        # Obtener reserva activa
+        reservation = self.api.get_user_reservation(lat=self.latitude, lon=self.longitude)
+        
+        if not reservation or not reservation.get('reservationId'):
+            await update.message.reply_text(
+                "📋 *No tienes ninguna reserva activa*\n\nUsa 📅 Reservar para crear una.",
+                parse_mode='Markdown',
+                reply_markup=self.get_main_keyboard()
+            )
+            return
+        
+        # Formatear información de la reserva
+        nombre = reservation.get('chargePointInfo', {}).get('foldedTitle', 'N/A')
+        socket_id = reservation.get('physicalSocketId')
+        socket_type = reservation.get('socketType', {}).get('socketName', 'N/A')
+        start_date = reservation.get('startDate', 'N/A')
+        end_date = reservation.get('endDate', 'N/A')
+        price = reservation.get('reserve', {}).get('finalPrice', 'N/A')
+        cancel_cost = reservation.get('cancelationCost', 'N/A')
+        status = reservation.get('status', {}).get('description', 'N/A')
+        
+        # Formatear fechas
+        try:
+            from datetime import datetime
+            start_dt = datetime.fromisoformat(start_date.replace('+00:00', '+00:00'))
+            end_dt = datetime.fromisoformat(end_date.replace('+00:00', '+00:00'))
+            start_str = start_dt.strftime('%H:%M')
+            end_str = end_dt.strftime('%H:%M')
+        except:
+            start_str = start_date
+            end_str = end_date
+        
+        mensaje = "📋 *TU RESERVA ACTIVA*\n\n"
+        mensaje += f"📍 *{nombre}*\n"
+        mensaje += f"🔌 Socket: {socket_id} ({socket_type})\n"
+        mensaje += f"⏰ Horario: {start_str} - {end_str}\n"
+        mensaje += f"💰 Precio: {price}€\n"
+        mensaje += f"📊 Estado: {status}\n"
+        mensaje += f"\n💸 Coste cancelación: {cancel_cost}€"
+        
+        buttons = [[InlineKeyboardButton("❌ Cancelar Reserva", callback_data="cancel_reservation")]]
+        
+        await update.message.reply_text(
+            mensaje,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+    
+    async def _ejecutar_reserva(self, query, cupr_id: int, socket_id: int):
+        """Ejecuta la reserva de un cargador"""
+        await query.edit_message_text("⏳ Procesando reserva...")
+        
+        try:
+            from redsys_payment import process_reservation_payment
+            
+            # 1. Obtener método de pago
+            payment = self.api.get_payment_method(lat=self.latitude, lon=self.longitude)
+            if not payment:
+                await query.edit_message_text("❌ No hay método de pago configurado en la app Iberdrola.")
+                return
+            
+            # 2. Obtener orderId
+            order = self.api.get_order_id(cupr_id, socket_id, amount=1.0, lat=self.latitude, lon=self.longitude)
+            if not order:
+                await query.edit_message_text("❌ Error al generar orden de pago.")
+                return
+            
+            order_id = order.get('orderId')
+            await query.edit_message_text(f"💳 Procesando pago (Order: {order_id})...\n\n📱 Aprueba el pago en tu app bancaria si es necesario.")
+            
+            # 3. Procesar pago (ejecutar en thread para no bloquear)
+            import asyncio
+            loop = asyncio.get_event_loop()
+            payment_success = await loop.run_in_executor(
+                None,
+                lambda: process_reservation_payment(
+                    order_data=order,
+                    payment_token=payment['token'],
+                    amount_cents=100,
+                    use_3ds=True,
+                    timeout_seconds=120
+                )
+            )
+            
+            if not payment_success:
+                await query.edit_message_text("❌ Error en el pago. La transacción no se completó.")
+                return
+            
+            # 4. Ejecutar reserva
+            result = self.api.reserve_charger(cupr_id, socket_id, order_id, lat=self.latitude, lon=self.longitude)
+            
+            if result:
+                nombre = result.get('chargePointInfo', {}).get('foldedTitle', 'Cargador')
+                # Corregir: obtener nombre de otra forma si no está
+                if not nombre or nombre == 'Cargador':
+                    nombre = f"Cargador {cupr_id}"
+                
+                end_date = result.get('endDate', 'N/A')
+                try:
+                    from datetime import datetime
+                    end_dt = datetime.fromisoformat(end_date.replace('+00:00', '+00:00'))
+                    end_str = end_dt.strftime('%H:%M')
+                except:
+                    end_str = end_date
+                
+                mensaje = "🎉 *¡RESERVA EXITOSA!*\n\n"
+                mensaje += f"📍 {nombre}\n"
+                mensaje += f"🔌 Socket: {socket_id}\n"
+                mensaje += f"⏰ Válida hasta: {end_str}\n"
+                mensaje += f"💰 Precio: 1€\n\n"
+                mensaje += "📱 Dirígete al cargador antes de que expire la reserva."
+                
+                await query.edit_message_text(mensaje, parse_mode='Markdown')
+            else:
+                await query.edit_message_text("❌ Error al crear la reserva. El pago se procesó pero la reserva falló.")
+                
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error durante la reserva: {str(e)[:100]}")
+    
+    async def _cancelar_reserva(self, query):
+        """Cancela la reserva activa"""
+        await query.edit_message_text("⏳ Cancelando reserva...")
+        
+        # Obtener datos de la reserva activa
+        transaction = self.api.get_transaction_in_progress(lat=self.latitude, lon=self.longitude)
+        
+        if not transaction or not transaction.get('reservationInProgress'):
+            await query.edit_message_text("ℹ️ No hay reserva activa para cancelar.")
+            return
+        
+        cupr_id = transaction.get('cuprId')
+        socket_id = transaction.get('physicalSocketId')
+        
+        # Cancelar
+        result = self.api.cancel_reservation(cupr_id, socket_id, lat=self.latitude, lon=self.longitude)
+        
+        if result:
+            await query.edit_message_text("✅ *Reserva cancelada correctamente*", parse_mode='Markdown')
+        else:
+            # Verificar si realmente se canceló
+            transaction2 = self.api.get_transaction_in_progress(lat=self.latitude, lon=self.longitude)
+            if not transaction2.get('reservationInProgress'):
+                await query.edit_message_text("✅ *Reserva cancelada correctamente*", parse_mode='Markdown')
+            else:
+                await query.edit_message_text("❌ Error al cancelar la reserva. Inténtalo de nuevo.")
+
     
     async def run_schedule_loop(self):
         """Ejecuta el schedule de forma asíncrona"""

@@ -227,14 +227,21 @@ class RedsysPayment:
         
         import time
         
-        print(f"🌐 Abriendo navegador para 3D Secure...")
+        # Detectar si hay display disponible (para modo headless en servidor)
+        has_display = os.getenv('DISPLAY') is not None
+        headless_mode = not has_display
+        
+        if headless_mode:
+            print(f"🌐 Ejecutando pago en modo headless (sin GUI)...")
+        else:
+            print(f"🌐 Abriendo navegador para 3D Secure...")
         print(f"   ⏱️ Tienes {timeout_seconds} segundos para aprobar en tu móvil")
         
         success = False
         
         with sync_playwright() as p:
-            # Lanzar navegador visible para que el usuario vea el proceso
-            browser = p.chromium.launch(headless=False)
+            # Lanzar navegador (headless si no hay display)
+            browser = p.chromium.launch(headless=headless_mode)
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Linux; Android 11; SM-G930F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.6668.70 Mobile Safari/537.36"
             )
