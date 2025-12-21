@@ -737,12 +737,14 @@ class MonitorCargadores:
             )
             return
         
-        # Filtrar favoritos disponibles
+        # Filtrar favoritos disponibles y obtener sus IDs
         buttons = []
         mensaje = "📅 *RESERVAR CARGADOR*\n\n"
         mensaje += "Selecciona un cargador disponible:\n\n"
         
         disponibles = 0
+        cupr_ids_disponibles = []
+        
         for fav in favoritos:
             location = fav.get('locationData', {})
             nombre = location.get('cuprName', 'Sin nombre')
@@ -751,28 +753,40 @@ class MonitorCargadores:
             
             if status == 'AVAILABLE':
                 disponibles += 1
-                # Obtener socket disponible
-                sockets = fav.get('chargePoints', [])
-                for cp in sockets:
-                    for socket in cp.get('physicalSocket', []):
-                        socket_status = socket.get('status', {}).get('statusCode', 'UNKNOWN')
-                        if socket_status == 'AVAILABLE':
-                            socket_id = socket.get('physicalSocketId')
-                            socket_type = socket.get('socketType', {}).get('label', '')
-                            mensaje += f"✅ *{nombre}*\n   Socket {socket_id} ({socket_type})\n\n"
-                            buttons.append([
-                                InlineKeyboardButton(
-                                    f"🔌 {nombre[:25]}",
-                                    callback_data=f"reserve_{cupr_id}_{socket_id}"
-                                )
-                            ])
-                            break  # Solo un socket por cargador
+                cupr_ids_disponibles.append(cupr_id)
             else:
                 mensaje += f"❌ _{nombre}_ - {status}\n"
         
         if disponibles == 0:
             await update.message.reply_text(
                 "❌ *No hay cargadores disponibles*\n\nTodos tus favoritos están ocupados o fuera de servicio.",
+                parse_mode='Markdown',
+                reply_markup=self.get_main_keyboard()
+            )
+            return
+        
+        # Obtener estado de conectores de los cargadores disponibles
+        conectores = self.api.obtener_estado_conectores(cupr_ids_disponibles, lat=self.latitude, lon=self.longitude)
+        
+        if conectores:
+            for c in conectores:
+                if c.get('status') == 'AVAILABLE':
+                    cupr_id = c.get('cuprId')
+                    socket_id = c.get('physicalSocketId')
+                    nombre = c.get('cuprName', 'Sin nombre')
+                    socket_type = c.get('socketType', '')
+                    
+                    mensaje += f"✅ *{nombre}*\n   Socket {socket_id} ({socket_type})\n\n"
+                    buttons.append([
+                        InlineKeyboardButton(
+                            f"🔌 {nombre[:25]}",
+                            callback_data=f"reserve_{cupr_id}_{socket_id}"
+                        )
+                    ])
+        
+        if not buttons:
+            await update.message.reply_text(
+                "❌ *No se encontraron sockets disponibles*\n\nIntenta de nuevo en unos segundos.",
                 parse_mode='Markdown',
                 reply_markup=self.get_main_keyboard()
             )
