@@ -40,8 +40,11 @@ class MonitorCargadores:
         self.auth = None
         self.auth_enabled = bool(os.getenv('IBERDROLA_USER')) and bool(os.getenv('IBERDROLA_PASS'))
         
-        # Base de datos SQLite
-        self.db_path = '/app/data/monitor.db'
+        # Base de datos SQLite (compatible con Docker y local)
+        if os.path.exists('/app'):
+            self.db_path = '/app/data/monitor.db'
+        else:
+            self.db_path = os.path.join(os.path.dirname(__file__), 'data', 'monitor.db')
         self.init_database()
         
         # Cargar tokens de autenticación si existen
