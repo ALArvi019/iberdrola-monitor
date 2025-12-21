@@ -25,8 +25,9 @@ class MonitorCargadores:
         self.longitude = float(os.getenv('LONGITUDE', '-6.162114'))
         self.check_interval = int(os.getenv('CHECK_INTERVAL', '60'))
         
-        # IDs de los cargadores IKEA
-        self.cupr_ids = [6103, 6115]
+        # IDs de los cargadores (separados por coma en .env)
+        charger_ids_str = os.getenv('CHARGER_IDS', '6103,6115')
+        self.cupr_ids = [int(x.strip()) for x in charger_ids_str.split(',')]
         
         # Control de escaneo
         self.scanning_paused = False
