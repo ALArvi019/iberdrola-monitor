@@ -135,6 +135,11 @@ class IberdrolaAPI:
                     return None
             
             response.raise_for_status()
+            
+            # Manejar respuestas vacías (como cancelReservation que devuelve Void)
+            if response.status_code == 204 or not response.text:
+                return {"success": True}
+            
             return response.json()
             
         except requests.exceptions.RequestException as e:
@@ -233,3 +238,108 @@ class IberdrolaAPI:
         if not self.auth_manager:
             return False
         return self.auth_manager.is_token_valid() or bool(self.auth_manager.refresh_token)
+    
+    # ==================== FUNCIONES DE RESERVA ====================
+    
+    def get_payment_method(self, lat=None, lon=None):
+        """
+        Obtiene el método de pago guardado del usuario.
+        Devuelve el token de la tarjeta y los últimos 4 dígitos.
+        """
+        url = f"{self.base_url}/appuser/getPaymentMethod"
+        return self._authenticated_request('POST', url, lat=lat, lon=lon, json={"expired": False})
+    
+    def get_order_id(self, cupr_id, physical_socket_id, amount=1.0, lat=None, lon=None):
+        """
+        Obtiene un orderId para una reserva o recarga.
+        
+        Args:
+            cupr_id: ID del cargador (cuprId)
+            physical_socket_id: ID del conector físico
+            amount: Importe de la preautorización (default: 1.0€)
+            
+        Returns:
+            dict con orderId y datos para el pago, o None si falla
+        """
+        url = f"{self.base_url}/payment/getOrderId?id=1"
+        payload = {
+            "amount": amount,
+            "cuprId": cupr_id,
+            "isPrInteroperable": False,
+            "movementType": 1,  # 1 = reserva
+            "physicalSocketId": physical_socket_id
+        }
+        return self._authenticated_request('POST', url, lat=lat, lon=lon, json=payload)
+    
+    def reserve_charger(self, cupr_id, physical_socket_id, order_id, lat=None, lon=None):
+        """
+        Realiza una reserva de cargador.
+        
+        Args:
+            cupr_id: ID del cargador (cuprId)
+            physical_socket_id: ID del conector físico
+            order_id: ID de orden obtenido de get_order_id
+            
+        Returns:
+            dict con datos de la reserva (reservationId, fechas, etc.) o None si falla
+        """
+        url = f"{self.base_url}/ocpp/reserveNow"
+        payload = {
+            "cuprId": cupr_id,
+            "orderId": order_id,
+            "physicalSocketId": physical_socket_id
+        }
+        return self._authenticated_request('POST', url, lat=lat, lon=lon, json=payload)
+    
+    def cancel_reservation(self, cupr_id, physical_socket_id, lat=None, lon=None):
+        """
+        Cancela una reserva activa.
+        
+        Args:
+            cupr_id: ID del cargador (cuprId)
+            physical_socket_id: ID del conector físico (physicalSocketId)
+            
+        Returns:
+            dict con resultado de la cancelación o None si falla
+        """
+        url = f"{self.base_url}/ocpp/cancelReservation"
+        payload = {
+            "cuprId": cupr_id,
+            "physicalSocketId": physical_socket_id
+        }
+        return self._authenticated_request('POST', url, lat=lat, lon=lon, json=payload)
+    
+    def get_transaction_in_progress(self, lat=None, lon=None):
+        """
+        Obtiene información sobre reservas o recargas en progreso.
+        
+        Returns:
+            dict con:
+                - rechargeInProgress: bool
+                - reservationInProgress: bool
+                - cuprId: int (si hay reserva activa)
+                - physicalSocketId: int (si hay reserva activa)
+                - reservationEndDate: str (si hay reserva activa)
+        """
+        url = f"{self.base_url}/appuseroperation/getTransactionInProgress"
+        return self._authenticated_request('POST', url, lat=lat, lon=lon)
+    
+    def get_user_reservation(self, lat=None, lon=None):
+        """
+        Obtiene información detallada de la reserva activa del usuario.
+        
+        Returns:
+            dict con:
+                - reservationId: int
+                - physicalSocketId: int
+                - startDate: str
+                - endDate: str
+                - reserve: dict (price, finalPrice, etc.)
+                - socketType: dict
+                - chargePointInfo: dict (foldedTitle)
+                - cancelationCost: float
+                - status: dict (statusCode, description)
+            None si no hay reserva activa
+        """
+        url = f"{self.base_url}/appuseroperation/getUserReservation"
+        return self._authenticated_request('GET', url, lat=lat, lon=lon)
