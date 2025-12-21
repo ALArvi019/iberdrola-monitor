@@ -302,8 +302,13 @@ class IberdrolaAuth:
             return None
 
 
-def interactive_login():
-    """Helper function for interactive login with MFA."""
+def interactive_login(auto_mfa=True):
+    """
+    Helper function for interactive login with MFA.
+    
+    Args:
+        auto_mfa: If True and IMAP credentials are configured, try to read MFA code from email
+    """
     auth = IberdrolaAuth()
     
     # Check if we already have valid tokens
@@ -324,7 +329,24 @@ def interactive_login():
     
     if result and result.get("status") == "mfa_required":
         print("\n📧 Se ha enviado un código a tu email.")
-        otp = input("🔢 Introduce el código: ")
+        
+        otp = None
+        
+        # Try automatic email reading if configured
+        if auto_mfa and os.getenv("IMAP_USER") and os.getenv("IMAP_PASS"):
+            try:
+                from email_mfa_reader import get_mfa_code_from_email
+                print("🤖 Intentando leer código automáticamente del email...")
+                otp = get_mfa_code_from_email(max_wait_seconds=60)
+            except ImportError:
+                print("⚠️ Módulo email_mfa_reader no disponible")
+            except Exception as e:
+                print(f"⚠️ Error leyendo email: {e}")
+        
+        # If automatic reading failed, ask for manual input
+        if not otp:
+            otp = input("🔢 Introduce el código: ")
+        
         result = auth.submit_mfa_code(result["mfa_state"], otp)
     
     if result and result.get("status") == "success":
@@ -333,9 +355,21 @@ def interactive_login():
     return None
 
 
+def automatic_login():
+    """
+    Intenta hacer login completamente automático.
+    Requiere IBERDROLA_USER, IBERDROLA_PASS, IMAP_USER, IMAP_PASS en el .env
+    
+    Returns:
+        str: access_token o None si falla
+    """
+    return interactive_login(auto_mfa=True)
+
+
 if __name__ == "__main__":
     token = interactive_login()
     if token:
         print(f"\n🎉 Token obtenido: {token[:50]}...")
     else:
         print("\n❌ No se pudo obtener el token")
+
