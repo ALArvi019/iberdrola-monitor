@@ -18,15 +18,17 @@ class IberdrolaAPI:
     - Con auth_manager: Acceso a funciones de usuario (favoritos, historial, reservas)
     """
     
-    def __init__(self, device_id, auth_manager=None):
+    def __init__(self, device_id, auth_manager=None, on_auth_failure=None):
         """
         Args:
             device_id: Identificador único del dispositivo
             auth_manager: Instancia de IberdrolaAuth para peticiones autenticadas (opcional)
+            on_auth_failure: Callback cuando falla la autenticación y se necesita re-login
         """
         self.base_url = "https://eva.iberdrola.com/vecomges/api"
         self.device_id = device_id
         self.auth_manager = auth_manager
+        self.on_auth_failure = on_auth_failure  # Callback para re-autenticación externa
         
         self.base_headers = {
             'Content-Type': 'application/json; charset=UTF-8',
@@ -66,6 +68,84 @@ class IberdrolaAPI:
             headers['Authorization'] = ''
         
         return headers
+    
+    def _authenticated_request(self, method, url, lat=None, lon=None, **kwargs):
+        """
+        Realiza una petición autenticada con manejo de errores 401.
+        Si recibe 401, intenta refrescar el token y reintentar una vez.
+        
+        Args:
+            method: 'GET' o 'POST'
+            url: URL completa del endpoint
+            lat, lon: Coordenadas opcionales
+            **kwargs: Argumentos adicionales para requests (json, data, etc.)
+        
+        Returns:
+            Response JSON o None si falla
+        """
+        if not self.auth_manager:
+            print("❌ Esta función requiere autenticación")
+            return None
+        
+        # Códigos que indican problema de autenticación
+        # 401 = Unauthorized (estándar)
+        # 403 = Forbidden (Iberdrola lo usa cuando no hay token)
+        # 500 = Internal Server Error (Iberdrola lo usa cuando el token es inválido)
+        AUTH_ERROR_CODES = (401, 403, 500)
+        
+        # Primer intento
+        headers = self._get_headers(authenticated=True, lat=lat, lon=lon)
+        
+        try:
+            if method.upper() == 'GET':
+                response = requests.get(url, headers=headers, timeout=10, **kwargs)
+            else:
+                response = requests.post(url, headers=headers, timeout=10, **kwargs)
+            
+            # Si es error de autenticación, intentar refrescar y reintentar
+            if response.status_code in AUTH_ERROR_CODES:
+                print(f"⚠️ Error de autenticación ({response.status_code}). Intentando refrescar token...")
+                
+                # Intentar refresh token
+                if self.auth_manager.refresh_token:
+                    if self.auth_manager.refresh_access_token():
+                        print("✅ Token refrescado correctamente")
+                        # Reintentar con nuevo token
+                        headers = self._get_headers(authenticated=True, lat=lat, lon=lon)
+                        if method.upper() == 'GET':
+                            response = requests.get(url, headers=headers, timeout=10, **kwargs)
+                        else:
+                            response = requests.post(url, headers=headers, timeout=10, **kwargs)
+                        
+                        if response.status_code in AUTH_ERROR_CODES:
+                            # Aún falla, necesita login completo
+                            print(f"❌ Token refrescado pero sigue fallando ({response.status_code}). Se requiere login completo.")
+                            if self.on_auth_failure:
+                                self.on_auth_failure()
+                            return None
+                    else:
+                        print("❌ No se pudo refrescar el token. Se requiere login completo.")
+                        if self.on_auth_failure:
+                            self.on_auth_failure()
+                        return None
+                else:
+                    print("❌ No hay refresh_token. Se requiere login completo.")
+                    if self.on_auth_failure:
+                        self.on_auth_failure()
+                    return None
+            
+            response.raise_for_status()
+            return response.json()
+            
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Error en la petición: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                if e.response.status_code in AUTH_ERROR_CODES:
+                    print(f"⚠️ Error {e.response.status_code} - Problema de autenticación")
+                    if self.on_auth_failure:
+                        self.on_auth_failure()
+                print(f"   Respuesta: {e.response.text[:200] if e.response.text else 'vacía'}")
+            return None
     
     # ==================== FUNCIONES PÚBLICAS (SIN LOGIN) ====================
     
@@ -127,64 +207,26 @@ class IberdrolaAPI:
     def obtener_favoritos(self, lat=None, lon=None):
         """
         Obtiene la lista de cargadores favoritos del usuario.
-        Requiere autenticación.
+        Requiere autenticación. Maneja errores de auth automáticamente.
         """
-        if not self.auth_manager:
-            print("❌ Esta función requiere autenticación")
-            return None
-        
-        headers = self._get_headers(authenticated=True, lat=lat, lon=lon)
         url = f"{self.base_url}/appfavoritechargepoint/get-favorite-charge-points"
-        
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Error obteniendo favoritos: {e}")
-            if hasattr(e, 'response') and e.response:
-                print(f"   Respuesta: {e.response.text[:200]}")
-            return None
+        return self._authenticated_request('GET', url, lat=lat, lon=lon)
     
     def obtener_historial_recargas(self, lat=None, lon=None):
         """
         Obtiene el historial de recargas del usuario.
-        Requiere autenticación.
+        Requiere autenticación. Maneja errores de auth automáticamente.
         """
-        if not self.auth_manager:
-            print("❌ Esta función requiere autenticación")
-            return None
-        
-        headers = self._get_headers(authenticated=True, lat=lat, lon=lon)
         url = f"{self.base_url}/appoperation/recharge/history"
-        
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Error obteniendo historial: {e}")
-            return None
+        return self._authenticated_request('GET', url, lat=lat, lon=lon)
     
     def obtener_datos_usuario(self, lat=None, lon=None):
         """
         Obtiene los datos del perfil del usuario.
-        Requiere autenticación.
+        Requiere autenticación. Maneja errores de auth automáticamente.
         """
-        if not self.auth_manager:
-            print("❌ Esta función requiere autenticación")
-            return None
-        
-        headers = self._get_headers(authenticated=True, lat=lat, lon=lon)
         url = f"{self.base_url}/appuser/newUserData"
-        
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Error obteniendo datos de usuario: {e}")
-            return None
+        return self._authenticated_request('GET', url, lat=lat, lon=lon)
     
     def is_authenticated(self):
         """Comprueba si hay una sesión autenticada válida."""

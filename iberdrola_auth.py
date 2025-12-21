@@ -49,8 +49,9 @@ class IberdrolaAuth:
         self.id_token = None
         self.token_expiry = None
         
-        # Try to load existing tokens
-        self._load_tokens()
+        # Try to load existing tokens (only if tokens_file is set)
+        if self.tokens_file:
+            self._load_tokens()
     
     def _generate_pkce(self):
         """Generate PKCE code_verifier and code_challenge."""
@@ -63,6 +64,9 @@ class IberdrolaAuth:
     
     def _save_tokens(self):
         """Save tokens to file for persistence."""
+        if not self.tokens_file:
+            return  # No file storage, tokens managed externally
+        
         os.makedirs(os.path.dirname(self.tokens_file), exist_ok=True)
         data = {
             "access_token": self.access_token,
