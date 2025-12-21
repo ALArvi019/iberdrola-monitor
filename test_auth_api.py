@@ -56,7 +56,24 @@ def test_auth_flow():
         if result.get("status") == "mfa_required":
             print("\n📧 Se ha enviado un código a tu email.")
             print("   Revisa tu bandeja de entrada...")
-            otp = input("\n🔢 Introduce el código de 6 dígitos: ")
+            
+            otp = None
+            
+            # Try automatic email reading if IMAP is configured
+            if os.getenv("IMAP_USER") and os.getenv("IMAP_PASS"):
+                try:
+                    from email_mfa_reader import get_mfa_code_from_email
+                    print("\n🤖 Intentando leer código automáticamente...")
+                    otp = get_mfa_code_from_email(max_wait_seconds=60)
+                except ImportError:
+                    print("⚠️ Módulo email_mfa_reader no disponible")
+                except Exception as e:
+                    print(f"⚠️ Error leyendo email: {e}")
+            
+            # Fall back to manual input
+            if not otp:
+                otp = input("\n🔢 Introduce el código de 6 dígitos: ")
+            
             result = auth.submit_mfa_code(result["mfa_state"], otp)
         
         if not result or result.get("status") != "success":

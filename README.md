@@ -102,7 +102,8 @@ iberdrola-monitor/
 ├── bot_monitor.py          # Bot principal de Telegram
 ├── iberdrola_api.py        # Cliente API (público + autenticado)
 ├── iberdrola_auth.py       # Módulo de autenticación OAuth2+PKCE+MFA
-├── find_chargers.py        # 🆕 Buscador de cargadores por coordenadas
+├── email_mfa_reader.py     # 🆕 Lector automático de códigos MFA del email
+├── find_chargers.py        # Buscador de cargadores por coordenadas
 ├── test_api.py             # Test básico de la API pública
 ├── test_auth_api.py        # Test completo de autenticación
 ├── deploy.sh               # Script de despliegue
@@ -118,7 +119,22 @@ iberdrola-monitor/
 
 ## 🛠️ Scripts
 
-### `find_chargers.py` (🆕 Nuevo)
+### `email_mfa_reader.py` (🆕 Nuevo)
+Lee automáticamente los códigos MFA de Iberdrola desde tu email Gmail.
+
+**Requisitos:**
+1. Activar IMAP en Gmail: Settings > Forwarding and POP/IMAP
+2. Crear App Password: https://myaccount.google.com/apppasswords
+
+**Configuración en .env:**
+```env
+IMAP_USER=tu_email@gmail.com
+IMAP_PASS=tu_app_password_de_google
+```
+
+Con esto configurado, el login será **100% automático** (sin intervención humana).
+
+### `find_chargers.py`
 Busca cargadores Iberdrola cerca de unas coordenadas y muestra sus IDs.
 
 ```bash
