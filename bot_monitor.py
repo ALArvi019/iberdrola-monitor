@@ -13,6 +13,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 import asyncio
 
 from iberdrola_api import IberdrolaAPI
+from iberdrola_auth import IberdrolaAuth
 
 
 class MonitorCargadores:
@@ -32,12 +33,19 @@ class MonitorCargadores:
         # Control de escaneo
         self.scanning_paused = False
         
-        # API de Iberdrola
+        # API de Iberdrola (sin auth inicialmente)
         self.api = IberdrolaAPI(device_id=self.device_id)
+        
+        # Autenticación (se inicializa después de cargar tokens de DB)
+        self.auth = None
+        self.auth_enabled = bool(os.getenv('IBERDROLA_USER')) and bool(os.getenv('IBERDROLA_PASS'))
         
         # Base de datos SQLite
         self.db_path = '/app/data/monitor.db'
         self.init_database()
+        
+        # Cargar tokens de autenticación si existen
+        self._load_auth_from_db()
         
         # Application de Telegram
         self.app = None
@@ -52,7 +60,7 @@ class MonitorCargadores:
         keyboard = [
             [KeyboardButton("🔌 Ver Estado"), KeyboardButton("🔄 Forzar Chequeo")],
             [KeyboardButton("⏸️ Pausar/Reanudar"), KeyboardButton("⏱️ Cambiar Intervalo")],
-            [KeyboardButton("ℹ️ Info")]
+            [KeyboardButton("⭐ Favoritos"), KeyboardButton("ℹ️ Info")]
         ]
         return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
     
@@ -84,9 +92,147 @@ class MonitorCargadores:
             )
         ''')
         
+        # Tabla para tokens de autenticación
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS auth_tokens (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                access_token TEXT,
+                refresh_token TEXT,
+                id_token TEXT,
+                token_expiry TEXT,
+                updated_at TEXT
+            )
+        ''')
+        
         conn.commit()
         conn.close()
         print("✅ Base de datos inicializada")
+    
+    def _load_auth_from_db(self):
+        """Carga tokens de autenticación desde la base de datos"""
+        if not self.auth_enabled:
+            print("ℹ️ Autenticación no configurada (sin IBERDROLA_USER/PASS)")
+            return
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT access_token, refresh_token, id_token, token_expiry FROM auth_tokens WHERE id = 1')
+        row = cursor.fetchone()
+        conn.close()
+        
+        # Crear instancia de IberdrolaAuth
+        self.auth = IberdrolaAuth(tokens_file=None)  # No usar archivo
+        
+        if row and row[1]:  # Si hay refresh_token
+            self.auth.access_token = row[0]
+            self.auth.refresh_token = row[1]
+            self.auth.id_token = row[2]
+            if row[3]:
+                from datetime import datetime
+                self.auth.token_expiry = datetime.fromisoformat(row[3])
+            
+            # Actualizar API con auth manager y callback de auth failure
+            self.api = IberdrolaAPI(
+                device_id=self.device_id, 
+                auth_manager=self.auth,
+                on_auth_failure=self._on_auth_failure
+            )
+            print("✅ Tokens de autenticación cargados desde DB")
+        else:
+            print("ℹ️ No hay tokens guardados, se requerirá login")
+    
+    def _save_auth_to_db(self):
+        """Guarda tokens de autenticación en la base de datos"""
+        if not self.auth:
+            return
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        expiry_str = self.auth.token_expiry.isoformat() if self.auth.token_expiry else None
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO auth_tokens (id, access_token, refresh_token, id_token, token_expiry, updated_at)
+            VALUES (1, ?, ?, ?, ?, ?)
+        ''', (
+            self.auth.access_token,
+            self.auth.refresh_token,
+            self.auth.id_token,
+            expiry_str,
+            datetime.now().isoformat()
+        ))
+        
+        conn.commit()
+        conn.close()
+        print("💾 Tokens guardados en DB")
+    
+    async def ensure_authenticated(self):
+        """Asegura que tenemos una sesión autenticada válida"""
+        if not self.auth_enabled:
+            return False, "Autenticación no configurada. Añade IBERDROLA_USER e IBERDROLA_PASS al .env"
+        
+        if not self.auth:
+            self._load_auth_from_db()
+        
+        # Verificar si el token es válido
+        if self.auth.is_token_valid():
+            return True, None
+        
+        # Intentar renovar con refresh_token
+        if self.auth.refresh_token:
+            print("🔄 Renovando token...")
+            if self.auth.refresh_access_token():
+                self._save_auth_to_db()
+                return True, None
+        
+        # Necesita login completo con MFA
+        print("🔐 Iniciando login con MFA...")
+        username = os.getenv("IBERDROLA_USER")
+        password = os.getenv("IBERDROLA_PASS")
+        
+        result = self.auth.start_login(username, password)
+        
+        if not result:
+            return False, "Error iniciando login"
+        
+        if result.get("status") == "mfa_required":
+            # Intentar leer código del email automáticamente
+            otp = None
+            if os.getenv("IMAP_USER") and os.getenv("IMAP_PASS"):
+                try:
+                    from email_mfa_reader import get_mfa_code_from_email
+                    print("📧 Leyendo código MFA del email...")
+                    otp = get_mfa_code_from_email(max_wait_seconds=90)
+                except Exception as e:
+                    print(f"⚠️ Error leyendo email: {e}")
+            
+            if not otp:
+                return False, "No se pudo obtener el código MFA automáticamente. Configura IMAP_USER e IMAP_PASS."
+            
+            result = self.auth.submit_mfa_code(result["mfa_state"], otp)
+        
+        if result and result.get("status") == "success":
+            self._save_auth_to_db()
+            # Actualizar API con auth manager y callback de auth failure
+            self.api = IberdrolaAPI(
+                device_id=self.device_id, 
+                auth_manager=self.auth,
+                on_auth_failure=self._on_auth_failure
+            )
+            return True, None
+        
+        return False, "Error en el proceso de autenticación"
+    
+    def _on_auth_failure(self):
+        """
+        Callback que se ejecuta cuando la API detecta un error de autenticación.
+        Invalida los tokens para forzar un re-login en la próxima petición.
+        """
+        print("🔒 Sesión inválida detectada. Se requiere re-autenticación.")
+        if self.auth:
+            self.auth.access_token = None
+            self.auth.token_expiry = None
+            # Mantenemos refresh_token por si aún sirve
     
     def guardar_estado(self, conectores):
         """Guarda el estado actual en la base de datos"""
@@ -346,6 +492,9 @@ class MonitorCargadores:
         elif texto == "⏱️ Cambiar Intervalo":
             await self.cambiar_intervalo(update, context)
         
+        elif texto == "⭐ Favoritos":
+            await self.ver_favoritos(update, context)
+        
         elif texto == "ℹ️ Info":
             await self.mostrar_info(update, context)
         
@@ -377,6 +526,75 @@ class MonitorCargadores:
                 "❌ Error al obtener datos",
                 reply_markup=self.get_main_keyboard()
             )
+    
+    async def ver_favoritos(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Muestra los cargadores favoritos del usuario"""
+        await update.message.reply_text("⏳ Autenticando y obteniendo favoritos...")
+        
+        # Verificar autenticación
+        authenticated, error = await self.ensure_authenticated()
+        
+        if not authenticated:
+            await update.message.reply_text(
+                f"❌ *Error de autenticación*\n\n{error}",
+                parse_mode='Markdown',
+                reply_markup=self.get_main_keyboard()
+            )
+            return
+        
+        # Obtener favoritos
+        favoritos = self.api.obtener_favoritos(lat=self.latitude, lon=self.longitude)
+        
+        if favoritos is None:
+            await update.message.reply_text(
+                "❌ Error al obtener favoritos. Puede que la sesión haya expirado.",
+                reply_markup=self.get_main_keyboard()
+            )
+            return
+        
+        if len(favoritos) == 0:
+            await update.message.reply_text(
+                "📋 No tienes cargadores favoritos guardados en la app.",
+                reply_markup=self.get_main_keyboard()
+            )
+            return
+        
+        # Formatear mensaje con favoritos
+        status_emoji = {
+            'AVAILABLE': '✅',
+            'OCCUPIED': '🔴',
+            'RESERVED': '🟡',
+            'OUT_OF_SERVICE': '⚠️',
+            'UNKNOWN': '❓'
+        }
+        
+        mensaje = "⭐ *TUS CARGADORES FAVORITOS*\n\n"
+        
+        for fav in favoritos:
+            location = fav.get('locationData', {})
+            nombre = location.get('cuprName', 'Sin nombre')
+            alias = fav.get('alias', '')
+            status_code = fav.get('cpStatus', {}).get('statusCode', 'UNKNOWN')
+            emoji = status_emoji.get(status_code, '❓')
+            
+            # Dirección
+            address = location.get('supplyPointData', {}).get('cpAddress', {})
+            calle = address.get('streetName', '')
+            ciudad = address.get('townName', '')
+            
+            mensaje += f"{emoji} *{nombre}*\n"
+            if alias:
+                mensaje += f"   📝 Alias: {alias}\n"
+            mensaje += f"   📍 {calle}, {ciudad}\n"
+            mensaje += f"   🔋 Estado: `{status_code}`\n\n"
+        
+        mensaje += f"_Total: {len(favoritos)} favoritos_"
+        
+        await update.message.reply_text(
+            mensaje,
+            parse_mode='Markdown',
+            reply_markup=self.get_main_keyboard()
+        )
     
     async def forzar_chequeo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Fuerza un chequeo manual"""
