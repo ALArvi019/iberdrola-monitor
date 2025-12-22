@@ -975,7 +975,16 @@ class MonitorCargadores:
                     mensaje += f"(cada {self.RENEW_INTERVAL_MINUTES} min)\n\n"
                     mensaje += "📱 Prepara tu app bancaria para aprobar el 3DS."
                     
-                    await query.edit_message_text(mensaje, parse_mode='Markdown')
+                    # Botón para activar timer de 13 minutos
+                    timer_minutes = self.RENEW_INTERVAL_MINUTES - 1  # 1 min antes para prepararse
+                    timer_url = f"https://www.google.com/search?q=set+timer+{timer_minutes}+minutes"
+                    buttons = [[InlineKeyboardButton(f"⏱️ Poner timer {timer_minutes} min", url=timer_url)]]
+                    
+                    await query.edit_message_text(
+                        mensaje, 
+                        parse_mode='Markdown',
+                        reply_markup=InlineKeyboardMarkup(buttons)
+                    )
                 
                 return True
             else:
@@ -1093,11 +1102,20 @@ class MonitorCargadores:
                 from datetime import datetime, timedelta
                 self.auto_renew_next_time = datetime.now() + timedelta(minutes=self.RENEW_INTERVAL_MINUTES)
                 next_renew_str = self.auto_renew_next_time.strftime('%H:%M')
+                
+                # Crear botón de timer
+                timer_minutes = self.RENEW_INTERVAL_MINUTES - 1
+                timer_url = f"https://www.google.com/search?q=set+timer+{timer_minutes}+minutes"
+                timer_buttons = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(f"⏱️ Timer {timer_minutes} min", url=timer_url)
+                ]])
+                
                 await self._send_notification(
                     "🔄 *Reserva renovada*\n\n"
                     f"Cargador {cupr_id}, Socket {socket_id}\n"
                     f"⏱️ Próxima renovación: *{next_renew_str}*\n\n"
-                    "📱 Prepara tu app bancaria."
+                    "📱 Prepara tu app bancaria.",
+                    reply_markup=timer_buttons
                 )
             else:
                 print("   ❌ Error al renovar reserva")
@@ -1147,14 +1165,14 @@ class MonitorCargadores:
             print(f"❌ Error en reserva silenciosa: {e}")
             return False
     
-    async def _send_notification(self, message: str):
+    async def _send_notification(self, message: str, reply_markup=None):
         """Envía una notificación al usuario"""
         try:
             await self.app.bot.send_message(
                 chat_id=self.chat_id,
                 text=message,
                 parse_mode='Markdown',
-                reply_markup=self.get_main_keyboard()
+                reply_markup=reply_markup or self.get_main_keyboard()
             )
         except Exception as e:
             print(f"❌ Error enviando notificación: {e}")
