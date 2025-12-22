@@ -19,11 +19,18 @@ Bot de Telegram para monitorizar, **reservar** y gestionar cargadores eléctrico
 - 🔄 Renovación automática de tokens (sin repetir MFA)
 
 ### 🆕 Reservas de Cargadores
-- � **Reservar cargador** desde Telegram
+- 📅 **Reservar cargador** desde Telegram
 - 📋 **Ver reserva activa** con detalles completos
 - ❌ **Cancelar reserva** con un toque
 - 💳 **Pago con 3D Secure** (headless, aprueba en la app del banco)
 - 🔄 Login automático con MFA para reservar
+
+### 🔄 Auto-Renovación de Reservas (Nuevo!)
+- ⏱️ **Renovación automática cada 14 minutos** (antes del límite gratis de 15 min)
+- 📱 **Botón para poner timer** en tu móvil (13 min antes de cada renovación)
+- 🔔 **Notificación en cada renovación** con hora de la próxima
+- 🛑 **Se detiene automáticamente** cuando empiezas a cargar o cancelas
+- ⏰ Mantén tu reserva indefinidamente hasta llegar al cargador
 
 ## �🚀 Guía de Configuración Rápida
 
@@ -256,8 +263,23 @@ Despliega cambios al servidor de producción.
 3. **Selecciona un cargador** con el botón
 4. El bot procesa el pago (1€) via 3D Secure
 5. **Aprueba en tu app bancaria** (notificación push)
-6. ¡Reserva confirmada! Válida 30 minutos
-7. Para cancelar: **📋 Mi Reserva → Cancelar**
+6. ¡Reserva confirmada! Con **auto-renovación activa**
+
+### Auto-Renovación
+
+Tras reservar, el bot mantiene tu reserva activa indefinidamente:
+
+- ⏱️ **Cada 14 minutos** el bot cancela y vuelve a reservar automáticamente
+- 📱 Recibes **notificación con hora exacta** de la próxima renovación
+- 🔔 **Botón "Poner timer 13 min"** para recordarte aprobar el 3DS
+- 💳 Debes **aprobar cada pago 3DS** en tu app bancaria
+
+**La auto-renovación se detiene cuando:**
+- 🔌 Empiezas a cargar (detecta cambio de estado)
+- ❌ Cancelas la reserva manualmente
+- ⚠️ El socket deja de estar disponible
+
+Para cancelar: **📋 Mi Reserva → Cancelar Reserva**
 
 ## 📊 Iconos de Estado
 
