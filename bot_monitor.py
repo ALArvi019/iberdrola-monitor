@@ -50,6 +50,13 @@ class MonitorCargadores:
         # Cargar tokens de autenticación si existen
         self._load_auth_from_db()
         
+        # Auto-renovación de reservas
+        self.auto_renew_active = False
+        self.auto_renew_cupr_id = None
+        self.auto_renew_socket_id = None
+        self.auto_renew_task = None
+        self.RENEW_INTERVAL_MINUTES = 14  # Cancelar y renovar cada 14 minutos (antes de los 15 min gratis)
+        
         # Application de Telegram
         self.app = None
         
@@ -861,7 +868,15 @@ class MonitorCargadores:
         mensaje += f"⏰ Horario: {start_str} - {end_str}\n"
         mensaje += f"💰 Precio: {price}€\n"
         mensaje += f"📊 Estado: {status}\n"
-        mensaje += f"\n💸 Coste cancelación: {cancel_cost}€"
+        
+        # Mostrar estado de auto-renovación
+        if self.auto_renew_active:
+            mensaje += f"\n🔄 *Auto-renovación: ACTIVA*\n"
+            mensaje += f"Se renueva cada {self.RENEW_INTERVAL_MINUTES} min"
+        else:
+            mensaje += f"\n🔄 Auto-renovación: Inactiva"
+        
+        mensaje += f"\n\n💸 Coste cancelación: {cancel_cost}€"
         
         buttons = [[InlineKeyboardButton("❌ Cancelar Reserva", callback_data="cancel_reservation")]]
         
@@ -871,9 +886,10 @@ class MonitorCargadores:
             reply_markup=InlineKeyboardMarkup(buttons)
         )
     
-    async def _ejecutar_reserva(self, query, cupr_id: int, socket_id: int):
+    async def _ejecutar_reserva(self, query, cupr_id: int, socket_id: int, is_renewal: bool = False):
         """Ejecuta la reserva de un cargador"""
-        await query.edit_message_text("⏳ Procesando reserva...")
+        if not is_renewal:
+            await query.edit_message_text("⏳ Procesando reserva...")
         
         try:
             from redsys_payment import process_reservation_payment
@@ -881,17 +897,20 @@ class MonitorCargadores:
             # 1. Obtener método de pago
             payment = self.api.get_payment_method(lat=self.latitude, lon=self.longitude)
             if not payment:
-                await query.edit_message_text("❌ No hay método de pago configurado en la app Iberdrola.")
-                return
+                if not is_renewal:
+                    await query.edit_message_text("❌ No hay método de pago configurado en la app Iberdrola.")
+                return False
             
             # 2. Obtener orderId
             order = self.api.get_order_id(cupr_id, socket_id, amount=1.0, lat=self.latitude, lon=self.longitude)
             if not order:
-                await query.edit_message_text("❌ Error al generar orden de pago.")
-                return
+                if not is_renewal:
+                    await query.edit_message_text("❌ Error al generar orden de pago.")
+                return False
             
             order_id = order.get('orderId')
-            await query.edit_message_text(f"💳 Procesando pago (Order: {order_id})...\n\n📱 Aprueba el pago en tu app bancaria si es necesario.")
+            if not is_renewal:
+                await query.edit_message_text(f"💳 Procesando pago (Order: {order_id})...\n\n📱 Aprueba el pago en tu app bancaria si es necesario.")
             
             # 3. Procesar pago (ejecutar en thread para no bloquear)
             import asyncio
@@ -908,15 +927,15 @@ class MonitorCargadores:
             )
             
             if not payment_success:
-                await query.edit_message_text("❌ Error en el pago. La transacción no se completó.")
-                return
+                if not is_renewal:
+                    await query.edit_message_text("❌ Error en el pago. La transacción no se completó.")
+                return False
             
             # 4. Ejecutar reserva
             result = self.api.reserve_charger(cupr_id, socket_id, order_id, lat=self.latitude, lon=self.longitude)
             
             if result:
                 nombre = result.get('chargePointInfo', {}).get('foldedTitle', 'Cargador')
-                # Corregir: obtener nombre de otra forma si no está
                 if not nombre or nombre == 'Cargador':
                     nombre = f"Cargador {cupr_id}"
                 
@@ -928,23 +947,48 @@ class MonitorCargadores:
                 except:
                     end_str = end_date
                 
-                mensaje = "🎉 *¡RESERVA EXITOSA!*\n\n"
-                mensaje += f"📍 {nombre}\n"
-                mensaje += f"🔌 Socket: {socket_id}\n"
-                mensaje += f"⏰ Válida hasta: {end_str}\n"
-                mensaje += f"💰 Precio: 1€\n\n"
-                mensaje += "📱 Dirígete al cargador antes de que expire la reserva."
+                # Iniciar auto-renovación si no es ya una renovación
+                if not is_renewal:
+                    self.auto_renew_active = True
+                    self.auto_renew_cupr_id = cupr_id
+                    self.auto_renew_socket_id = socket_id
+                    
+                    # Iniciar tarea de auto-renovación
+                    if self.auto_renew_task:
+                        self.auto_renew_task.cancel()
+                    self.auto_renew_task = asyncio.create_task(self._auto_renew_loop())
+                    
+                    mensaje = "🎉 *¡RESERVA EXITOSA!*\n\n"
+                    mensaje += f"📍 {nombre}\n"
+                    mensaje += f"🔌 Socket: {socket_id}\n"
+                    mensaje += f"⏰ Válida hasta: {end_str}\n"
+                    mensaje += f"💰 Precio: 1€\n\n"
+                    mensaje += "🔄 *Auto-renovación ACTIVA*\n"
+                    mensaje += f"Se renovará cada {self.RENEW_INTERVAL_MINUTES} min automáticamente.\n\n"
+                    mensaje += "📱 Dirígete al cargador. La reserva se mantiene hasta que cargues o la canceles."
+                    
+                    await query.edit_message_text(mensaje, parse_mode='Markdown')
                 
-                await query.edit_message_text(mensaje, parse_mode='Markdown')
+                return True
             else:
-                await query.edit_message_text("❌ Error al crear la reserva. El pago se procesó pero la reserva falló.")
+                if not is_renewal:
+                    await query.edit_message_text("❌ Error al crear la reserva. El pago se procesó pero la reserva falló.")
+                return False
                 
         except Exception as e:
-            await query.edit_message_text(f"❌ Error durante la reserva: {str(e)[:100]}")
+            if not is_renewal:
+                await query.edit_message_text(f"❌ Error durante la reserva: {str(e)[:100]}")
+            return False
     
     async def _cancelar_reserva(self, query):
-        """Cancela la reserva activa"""
+        """Cancela la reserva activa y detiene auto-renovación"""
         await query.edit_message_text("⏳ Cancelando reserva...")
+        
+        # Detener auto-renovación
+        self.auto_renew_active = False
+        if self.auto_renew_task:
+            self.auto_renew_task.cancel()
+            self.auto_renew_task = None
         
         # Obtener datos de la reserva activa
         transaction = self.api.get_transaction_in_progress(lat=self.latitude, lon=self.longitude)
@@ -960,14 +1004,148 @@ class MonitorCargadores:
         result = self.api.cancel_reservation(cupr_id, socket_id, lat=self.latitude, lon=self.longitude)
         
         if result:
-            await query.edit_message_text("✅ *Reserva cancelada correctamente*", parse_mode='Markdown')
+            await query.edit_message_text("✅ *Reserva cancelada correctamente*\n\n🔄 Auto-renovación detenida.", parse_mode='Markdown')
         else:
             # Verificar si realmente se canceló
             transaction2 = self.api.get_transaction_in_progress(lat=self.latitude, lon=self.longitude)
             if not transaction2.get('reservationInProgress'):
-                await query.edit_message_text("✅ *Reserva cancelada correctamente*", parse_mode='Markdown')
+                await query.edit_message_text("✅ *Reserva cancelada correctamente*\n\n🔄 Auto-renovación detenida.", parse_mode='Markdown')
             else:
                 await query.edit_message_text("❌ Error al cancelar la reserva. Inténtalo de nuevo.")
+    
+    async def _auto_renew_loop(self):
+        """Loop de auto-renovación de reservas"""
+        print(f"🔄 Auto-renovación iniciada (cada {self.RENEW_INTERVAL_MINUTES} minutos)")
+        
+        while self.auto_renew_active:
+            # Esperar el intervalo de renovación
+            await asyncio.sleep(self.RENEW_INTERVAL_MINUTES * 60)
+            
+            if not self.auto_renew_active:
+                break
+            
+            print(f"🔄 Iniciando renovación automática...")
+            
+            # Verificar si aún hay reserva activa (podría haber empezado a cargar)
+            transaction = self.api.get_transaction_in_progress(lat=self.latitude, lon=self.longitude)
+            
+            if transaction and transaction.get('chargeInProgress'):
+                # Ya está cargando, detener auto-renovación
+                print("🔌 Carga en progreso detectada. Deteniendo auto-renovación.")
+                self.auto_renew_active = False
+                await self._send_notification(
+                    "🔌 *Carga iniciada*\n\n"
+                    "Auto-renovación detenida porque el vehículo está cargando."
+                )
+                break
+            
+            if not transaction or not transaction.get('reservationInProgress'):
+                # No hay reserva activa (expiró o se canceló externamente)
+                print("⚠️ No hay reserva activa. Deteniendo auto-renovación.")
+                self.auto_renew_active = False
+                await self._send_notification(
+                    "⚠️ *Reserva expirada*\n\n"
+                    "La reserva ya no está activa. Auto-renovación detenida."
+                )
+                break
+            
+            # Cancelar reserva actual
+            cupr_id = self.auto_renew_cupr_id
+            socket_id = self.auto_renew_socket_id
+            
+            print(f"   Cancelando reserva actual (cupr:{cupr_id}, socket:{socket_id})...")
+            self.api.cancel_reservation(cupr_id, socket_id, lat=self.latitude, lon=self.longitude)
+            
+            # Esperar un momento para que se procese
+            await asyncio.sleep(2)
+            
+            # Verificar que el socket sigue disponible
+            conectores = self.api.obtener_estado_conectores([cupr_id], lat=self.latitude, lon=self.longitude)
+            socket_available = False
+            for c in conectores or []:
+                if c.get('physicalSocketId') == socket_id and c.get('status') == 'AVAILABLE':
+                    socket_available = True
+                    break
+            
+            if not socket_available:
+                print("❌ Socket ya no disponible. Deteniendo auto-renovación.")
+                self.auto_renew_active = False
+                await self._send_notification(
+                    "❌ *Socket no disponible*\n\n"
+                    "El cargador ya no está disponible. Auto-renovación detenida."
+                )
+                break
+            
+            # Re-reservar
+            print(f"   Creando nueva reserva...")
+            success = await self._ejecutar_reserva_silenciosa(cupr_id, socket_id)
+            
+            if success:
+                print("   ✅ Reserva renovada correctamente")
+                await self._send_notification(
+                    "🔄 *Reserva renovada*\n\n"
+                    f"Cargador {cupr_id}, Socket {socket_id}\n"
+                    f"Próxima renovación en {self.RENEW_INTERVAL_MINUTES} minutos."
+                )
+            else:
+                print("   ❌ Error al renovar reserva")
+                self.auto_renew_active = False
+                await self._send_notification(
+                    "❌ *Error al renovar reserva*\n\n"
+                    "No se pudo renovar. Auto-renovación detenida."
+                )
+                break
+        
+        print("🔄 Auto-renovación finalizada")
+    
+    async def _ejecutar_reserva_silenciosa(self, cupr_id: int, socket_id: int):
+        """Ejecuta una reserva sin interacción de usuario (para renovaciones)"""
+        try:
+            from redsys_payment import process_reservation_payment
+            
+            payment = self.api.get_payment_method(lat=self.latitude, lon=self.longitude)
+            if not payment:
+                return False
+            
+            order = self.api.get_order_id(cupr_id, socket_id, amount=1.0, lat=self.latitude, lon=self.longitude)
+            if not order:
+                return False
+            
+            order_id = order.get('orderId')
+            
+            loop = asyncio.get_event_loop()
+            payment_success = await loop.run_in_executor(
+                None,
+                lambda: process_reservation_payment(
+                    order_data=order,
+                    payment_token=payment['token'],
+                    amount_cents=100,
+                    use_3ds=True,
+                    timeout_seconds=120
+                )
+            )
+            
+            if not payment_success:
+                return False
+            
+            result = self.api.reserve_charger(cupr_id, socket_id, order_id, lat=self.latitude, lon=self.longitude)
+            return result is not None
+            
+        except Exception as e:
+            print(f"❌ Error en reserva silenciosa: {e}")
+            return False
+    
+    async def _send_notification(self, message: str):
+        """Envía una notificación al usuario"""
+        try:
+            await self.app.bot.send_message(
+                chat_id=self.chat_id,
+                text=message,
+                parse_mode='Markdown',
+                reply_markup=self.get_main_keyboard()
+            )
+        except Exception as e:
+            print(f"❌ Error enviando notificación: {e}")
 
     
     async def run_schedule_loop(self):
