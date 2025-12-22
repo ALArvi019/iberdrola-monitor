@@ -55,6 +55,7 @@ class MonitorCargadores:
         self.auto_renew_cupr_id = None
         self.auto_renew_socket_id = None
         self.auto_renew_task = None
+        self.auto_renew_next_time = None  # Hora de próxima renovación
         self.RENEW_INTERVAL_MINUTES = 14  # Cancelar y renovar cada 14 minutos (antes de los 15 min gratis)
         
         # Application de Telegram
@@ -870,9 +871,10 @@ class MonitorCargadores:
         mensaje += f"📊 Estado: {status}\n"
         
         # Mostrar estado de auto-renovación
-        if self.auto_renew_active:
+        if self.auto_renew_active and self.auto_renew_next_time:
+            next_time_str = self.auto_renew_next_time.strftime('%H:%M')
             mensaje += f"\n🔄 *Auto-renovación: ACTIVA*\n"
-            mensaje += f"Se renueva cada {self.RENEW_INTERVAL_MINUTES} min"
+            mensaje += f"⏱️ Próxima: *{next_time_str}* (prepara 3DS)"
         else:
             mensaje += f"\n🔄 Auto-renovación: Inactiva"
         
@@ -953,6 +955,11 @@ class MonitorCargadores:
                     self.auto_renew_cupr_id = cupr_id
                     self.auto_renew_socket_id = socket_id
                     
+                    # Calcular próxima renovación
+                    from datetime import datetime, timedelta
+                    self.auto_renew_next_time = datetime.now() + timedelta(minutes=self.RENEW_INTERVAL_MINUTES)
+                    next_renew_str = self.auto_renew_next_time.strftime('%H:%M')
+                    
                     # Iniciar tarea de auto-renovación
                     if self.auto_renew_task:
                         self.auto_renew_task.cancel()
@@ -964,8 +971,9 @@ class MonitorCargadores:
                     mensaje += f"⏰ Válida hasta: {end_str}\n"
                     mensaje += f"💰 Precio: 1€\n\n"
                     mensaje += "🔄 *Auto-renovación ACTIVA*\n"
-                    mensaje += f"Se renovará cada {self.RENEW_INTERVAL_MINUTES} min automáticamente.\n\n"
-                    mensaje += "📱 Dirígete al cargador. La reserva se mantiene hasta que cargues o la canceles."
+                    mensaje += f"⏱️ Próxima renovación: *{next_renew_str}*\n"
+                    mensaje += f"(cada {self.RENEW_INTERVAL_MINUTES} min)\n\n"
+                    mensaje += "📱 Prepara tu app bancaria para aprobar el 3DS."
                     
                     await query.edit_message_text(mensaje, parse_mode='Markdown')
                 
@@ -1082,10 +1090,14 @@ class MonitorCargadores:
             
             if success:
                 print("   ✅ Reserva renovada correctamente")
+                from datetime import datetime, timedelta
+                self.auto_renew_next_time = datetime.now() + timedelta(minutes=self.RENEW_INTERVAL_MINUTES)
+                next_renew_str = self.auto_renew_next_time.strftime('%H:%M')
                 await self._send_notification(
                     "🔄 *Reserva renovada*\n\n"
                     f"Cargador {cupr_id}, Socket {socket_id}\n"
-                    f"Próxima renovación en {self.RENEW_INTERVAL_MINUTES} minutos."
+                    f"⏱️ Próxima renovación: *{next_renew_str}*\n\n"
+                    "📱 Prepara tu app bancaria."
                 )
             else:
                 print("   ❌ Error al renovar reserva")
