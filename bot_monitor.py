@@ -529,11 +529,19 @@ class MonitorCargadores:
         
         if conectores:
             mensaje = self.formatear_mensaje_estado(conectores)
-            await update.message.reply_text(
-                mensaje, 
-                parse_mode='Markdown',
-                reply_markup=self.get_main_keyboard()
-            )
+            try:
+                await update.message.reply_text(
+                    mensaje, 
+                    parse_mode='Markdown',
+                    reply_markup=self.get_main_keyboard()
+                )
+            except Exception as e:
+                # Si falla el Markdown, enviar sin formato
+                print(f"⚠️ Error Markdown, enviando sin formato: {e}")
+                await update.message.reply_text(
+                    mensaje.replace('*', '').replace('`', '').replace('_', ''), 
+                    reply_markup=self.get_main_keyboard()
+                )
         else:
             await update.message.reply_text(
                 "❌ Error al obtener datos",
