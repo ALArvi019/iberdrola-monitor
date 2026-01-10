@@ -322,7 +322,7 @@ class MonitorCargadores:
         """Formatea una tabla ASCII con el estado de los 4 cargadores"""
         status_emoji = {
             'AVAILABLE': '✅',
-            'OCCUPIED': '��',
+            'OCCUPIED': '🔴',
             'RESERVED': '🟡',
             'OUT_OF_SERVICE': '⚠️',
             'UNKNOWN': '❓'
@@ -718,6 +718,9 @@ class MonitorCargadores:
         
         elif query.data == 'cancel_reservation':
             await self._cancelar_reserva(query)
+        
+        elif query.data == 'stop_auto_renew':
+            await self._stop_auto_renew(query)
     
     async def iniciar_reserva(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Muestra los favoritos disponibles para reservar"""
@@ -880,7 +883,13 @@ class MonitorCargadores:
         
         mensaje += f"\n\n💸 Coste cancelación: {cancel_cost}€"
         
-        buttons = [[InlineKeyboardButton("❌ Cancelar Reserva", callback_data="cancel_reservation")]]
+        buttons = [
+            [InlineKeyboardButton("❌ Cancelar Reserva", callback_data="cancel_reservation")]
+        ]
+        
+        # Agregar botón de cancelar auto-renovación si está activa
+        if self.auto_renew_active:
+            buttons.append([InlineKeyboardButton("🔄 Desactivar Renovación Automática", callback_data="stop_auto_renew")])
         
         await update.message.reply_text(
             mensaje,
@@ -1029,6 +1038,23 @@ class MonitorCargadores:
                 await query.edit_message_text("✅ *Reserva cancelada correctamente*\n\n🔄 Auto-renovación detenida.", parse_mode='Markdown')
             else:
                 await query.edit_message_text("❌ Error al cancelar la reserva. Inténtalo de nuevo.")
+    
+    async def _stop_auto_renew(self, query):
+        """Detiene la auto-renovación sin cancelar la reserva activa"""
+        await query.edit_message_text("⏳ Desactivando renovación automática...")
+        
+        # Detener auto-renovación
+        self.auto_renew_active = False
+        if self.auto_renew_task:
+            self.auto_renew_task.cancel()
+            self.auto_renew_task = None
+        
+        await query.edit_message_text(
+            "✅ *Renovación automática desactivada*\n\n"
+            "Tu reserva actual permanece activa.\n"
+            "Usa 📋 Mi Reserva para ver detalles.",
+            parse_mode='Markdown'
+        )
     
     async def _auto_renew_loop(self):
         """Loop de auto-renovación de reservas"""
