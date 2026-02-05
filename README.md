@@ -109,6 +109,9 @@ IBERDROLA_PASS=tu_contraseña
 IMAP_USER=tu_email@gmail.com
 IMAP_PASS=tu_app_password_de_google
 
+# Versión de la app Iberdrola (actualizar cuando cambie)
+IBERDROLA_APP_VERSION=4.36.7
+
 # Redsys (para pagos de reservas)
 REDSYS_ANDROID_LICENSE=NMQuPUdGvjcP7yLhJHvH
 ```
@@ -241,6 +244,7 @@ Despliega cambios al servidor de producción.
 | `IBERDROLA_PASS` | Contraseña de Iberdrola | ❌ |
 | `IMAP_USER` | Email para leer MFA automático | ❌ |
 | `IMAP_PASS` | App Password de Gmail | ❌ |
+| `IBERDROLA_APP_VERSION` | Versión de la app a emular | ❌ (4.36.7) |
 | `REDSYS_ANDROID_LICENSE` | Licencia para pagos Redsys | ❌ |
 
 ## 📱 Comandos del Bot
