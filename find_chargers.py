@@ -16,6 +16,8 @@ import requests
 import secrets
 from math import radians, sin, cos, sqrt, atan2
 
+APP_VERSION = os.environ.get('IBERDROLA_APP_VERSION', '4.36.7')
+
 
 def haversine_distance(lat1, lon1, lat2, lon2):
     """Calcula la distancia en km entre dos puntos geográficos."""
@@ -39,14 +41,14 @@ def get_headers(device_id):
         'Accept-Language': 'es-ES',
         'Accept-Encoding': 'gzip',
         'Authorization': '',
-        'versionApp': 'ANDROID-4.35.0',
+        'versionApp': f'ANDROID-{APP_VERSION}',
         'Plataforma': 'Android',
         'societyId': '1',
         'deviceid': device_id,
         'deviceModel': 'samsung-o1s-SM-G991B',
         'c-rid': f"{secrets.token_hex(3)}-{secrets.token_hex(2)[:3]}-{secrets.token_hex(2)[:3]}-{secrets.token_hex(2)[:3]}-{secrets.token_hex(5)}",
         'darkMode': '0',
-        'User-Agent': 'Iberdrola/4.35.0/Dalvik/2.1.0 (Linux; U; Android 13; SM-G991B Build/TP1A.220624.014)',
+        'User-Agent': f'Iberdrola/{APP_VERSION}/Dalvik/2.1.0 (Linux; U; Android 13; SM-G991B Build/TP1A.220624.014)',
         'Connection': 'Keep-Alive'
     }
 

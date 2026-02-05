@@ -16,6 +16,7 @@ services:
       - IMAP_USER=${IMAP_USER}
       - IMAP_PASS=${IMAP_PASS}
       - REDSYS_ANDROID_LICENSE=${REDSYS_ANDROID_LICENSE}
+      - IBERDROLA_APP_VERSION=${IBERDROLA_APP_VERSION:-4.36.7}
       - TZ=Europe/Madrid
     volumes:
       - ./data:/app/data

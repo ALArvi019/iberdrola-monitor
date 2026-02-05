@@ -4,9 +4,12 @@ API de Iberdrola para obtener información de cargadores
 Soporta modo anónimo (público) y autenticado (con login)
 """
 
+import os
 import requests
 import json
 import secrets
+
+APP_VERSION = os.environ.get('IBERDROLA_APP_VERSION', '4.36.7')
 
 
 class IberdrolaAPI:
@@ -35,13 +38,13 @@ class IberdrolaAPI:
             'Accept': 'application/json',
             'Accept-Language': 'es-ES',
             'Accept-Encoding': 'gzip',
-            'versionApp': 'ANDROID-4.35.0',
+            'versionApp': f'ANDROID-{APP_VERSION}',
             'Plataforma': 'Android',
             'societyId': '1',
             'deviceid': self.device_id,
             'deviceModel': 'samsung-o1s-SM-G991B',
             'darkMode': '0',
-            'User-Agent': 'Iberdrola/4.35.0/Dalvik/2.1.0 (Linux; U; Android 13; SM-G991B Build/TP1A.220624.014)',
+            'User-Agent': f'Iberdrola/{APP_VERSION}/Dalvik/2.1.0 (Linux; U; Android 13; SM-G991B Build/TP1A.220624.014)',
             'Connection': 'Keep-Alive'
         }
     
