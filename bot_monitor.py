@@ -57,7 +57,12 @@ class MonitorCargadores:
         self.auto_renew_task = None
         self.auto_renew_next_time = None  # Hora de próxima renovación
         self.RENEW_INTERVAL_MINUTES = 14  # Cancelar y renovar cada 14 minutos (antes de los 15 min gratis)
-        
+
+        # Versión de la app (cargar desde DB si disponible)
+        self.app_version = os.environ.get('IBERDROLA_APP_VERSION', '4.36.7')
+        self.waiting_for_version = False
+        self._load_app_version()
+
         # Application de Telegram
         self.app = None
         
@@ -72,7 +77,7 @@ class MonitorCargadores:
             [KeyboardButton("🔌 Ver Estado"), KeyboardButton("🔄 Forzar Chequeo")],
             [KeyboardButton("📅 Reservar"), KeyboardButton("📋 Mi Reserva")],
             [KeyboardButton("⏸️ Pausar/Reanudar"), KeyboardButton("⏱️ Cambiar Intervalo")],
-            [KeyboardButton("⭐ Favoritos"), KeyboardButton("ℹ️ Info")]
+            [KeyboardButton("⭐ Favoritos"), KeyboardButton("📱 Versión"), KeyboardButton("ℹ️ Info")]
         ]
         return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
     
@@ -483,6 +488,7 @@ class MonitorCargadores:
         mensaje += "⏸️ *Pausar/Reanudar* - Control de escaneos\n"
         mensaje += "⏱️ *Cambiar Intervalo* - Ajustar frecuencia\n"
         mensaje += "⭐ *Favoritos* - Cargadores favoritos\n"
+        mensaje += "📱 *Versión* - Cambiar versión de la app\n"
         mensaje += "ℹ️ *Info* - Información del sistema"
         
         await update.message.reply_text(
@@ -494,7 +500,13 @@ class MonitorCargadores:
     async def manejar_texto(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Maneja los mensajes de texto del teclado"""
         texto = update.message.text
-        
+
+        # Interceptar input de versión
+        if self.waiting_for_version:
+            self.waiting_for_version = False
+            await self._set_new_version(update, texto)
+            return
+
         if texto == "🔌 Ver Estado":
             await self.ver_estado(update, context)
         
@@ -518,7 +530,10 @@ class MonitorCargadores:
         
         elif texto == "ℹ️ Info":
             await self.mostrar_info(update, context)
-        
+
+        elif texto == "📱 Versión":
+            await self.ver_version(update, context)
+
         else:
             await update.message.reply_text(
                 "Comando no reconocido. Usa los botones del teclado.",
@@ -677,6 +692,7 @@ class MonitorCargadores:
         mensaje += f"🔌 Cargadores: {', '.join(map(str, self.cupr_ids))}\n"
         mensaje += f"⏱️ Intervalo: {self.check_interval}s ({self.check_interval//60} min)\n"
         mensaje += f"🔄 Estado: {'⏸️ PAUSADO' if self.scanning_paused else '▶️ ACTIVO'}\n"
+        mensaje += f"📱 Versión app: `{self.app_version}`\n"
         mensaje += f"💾 Base de datos: {self.db_path}\n"
         
         await update.message.reply_text(
@@ -685,6 +701,58 @@ class MonitorCargadores:
             reply_markup=self.get_main_keyboard()
         )
     
+    def _load_app_version(self):
+        """Carga la versión de la app desde la DB (prioridad sobre env)"""
+        saved = self.get_config('app_version')
+        if saved:
+            self._apply_version(saved)
+            print(f"📱 Versión cargada desde DB: {saved}")
+        else:
+            print(f"📱 Versión desde env: {self.app_version}")
+
+    def _apply_version(self, version):
+        """Aplica una versión a los headers de la API"""
+        self.app_version = version
+        os.environ['IBERDROLA_APP_VERSION'] = version
+        self.api.base_headers['versionApp'] = f'ANDROID-{version}'
+        self.api.base_headers['User-Agent'] = f'Iberdrola/{version}/Dalvik/2.1.0 (Linux; U; Android 13; SM-G991B Build/TP1A.220624.014)'
+
+    async def ver_version(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Muestra la versión actual y permite cambiarla"""
+        mensaje = f"📱 *Versión de la App Iberdrola*\n\n"
+        mensaje += f"Versión actual: `{self.app_version}`\n\n"
+        mensaje += "Envía la nueva versión (ej: `4.36.9`):"
+
+        self.waiting_for_version = True
+        await update.message.reply_text(mensaje, parse_mode='Markdown')
+
+    async def _set_new_version(self, update: Update, version_str: str):
+        """Establece una nueva versión de la app"""
+        import re
+        version_str = version_str.strip()
+
+        if not re.match(r'^\d+\.\d+\.\d+$', version_str):
+            await update.message.reply_text(
+                f"❌ Formato inválido: `{version_str}`\n\nUsa formato X.Y.Z (ej: `4.36.9`)",
+                parse_mode='Markdown',
+                reply_markup=self.get_main_keyboard()
+            )
+            return
+
+        # Guardar en DB (persiste entre reinicios del contenedor)
+        self.set_config('app_version', version_str)
+
+        # Aplicar en memoria
+        self._apply_version(version_str)
+
+        await update.message.reply_text(
+            f"✅ *Versión actualizada a `{version_str}`*\n\n"
+            f"Headers de API actualizados.\n"
+            f"💾 Guardado en DB (persistente).",
+            parse_mode='Markdown',
+            reply_markup=self.get_main_keyboard()
+        )
+
     async def boton_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Maneja los botones inline (para cambiar intervalo)"""
         query = update.callback_query
