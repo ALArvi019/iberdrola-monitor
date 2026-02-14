@@ -424,11 +424,25 @@ class MonitorCargadores:
         """Chequea el estado de los cargadores y notifica cambios"""
         if self.scanning_paused:
             return
-        
+
         try:
+            # Usar favoritos si hay autenticación, sino CHARGER_IDS
+            cupr_ids = list(self.cupr_ids)
+            authenticated, _ = await self.ensure_authenticated()
+            if authenticated:
+                favoritos = self.api.obtener_favoritos(lat=self.latitude, lon=self.longitude)
+                if favoritos:
+                    fav_ids = []
+                    for fav in favoritos:
+                        cupr_id = fav.get('locationData', {}).get('cuprId')
+                        if cupr_id and cupr_id not in fav_ids:
+                            fav_ids.append(cupr_id)
+                    if fav_ids:
+                        cupr_ids = fav_ids
+
             # Obtener estado actual
             conectores = self.api.obtener_estado_conectores(
-                self.cupr_ids,
+                cupr_ids,
                 self.latitude,
                 self.longitude
             )
