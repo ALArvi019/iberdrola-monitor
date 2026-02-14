@@ -7,7 +7,7 @@ Bot de Telegram para monitorizar, **reservar** y gestionar cargadores eléctrico
 ### Modo Público (Sin Login)
 - 🔌 Monitorización en tiempo real de cargadores
 - 📊 Vista dinámica agrupada por cargador con estado de cada socket
-- 🔔 Notificaciones automáticas cuando cambia el estado
+- 🔔 Notificaciones automáticas cuando cambia el estado (incluye favoritos si autenticado)
 - ⏸️ Pausar/reanudar monitorización
 - ⏱️ Intervalo de escaneo configurable (30s a 10min)
 - 💾 Base de datos SQLite para persistencia
@@ -206,7 +206,7 @@ python3 find_chargers.py --radius 0.05
 ```
 
 ### `bot_monitor.py`
-Bot principal de Telegram. Monitoriza cargadores, gestiona reservas con auto-renovación y permite cambiar la versión de la app en runtime. Si hay autenticación, "Ver Estado" muestra automáticamente los cargadores favoritos; si no, usa los IDs de `CHARGER_IDS`.
+Bot principal de Telegram. Monitoriza cargadores, gestiona reservas con auto-renovación y permite cambiar la versión de la app en runtime. Si hay autenticación, tanto "Ver Estado" como el escaneo periódico usan automáticamente los cargadores favoritos; si no, usan los IDs de `CHARGER_IDS`.
 
 ### `iberdrola_api.py`
 Cliente API con soporte para:
