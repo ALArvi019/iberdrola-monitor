@@ -4,8 +4,8 @@ Script para hacer una reserva de cargador Iberdrola.
 Incluye flujo completo con 3D Secure.
 
 Uso:
-    python3 reservar_cargador.py              # Reserva automática en IKEA Jerez
-    python3 reservar_cargador.py 6103         # Reserva en cargador específico
+    python3 reservar_cargador.py              # Reserva automática (primer cargador del .env)
+    python3 reservar_cargador.py 1234         # Reserva en cargador específico
     python3 reservar_cargador.py cancel       # Cancela reserva activa
     python3 reservar_cargador.py status       # Muestra estado de reserva
 """

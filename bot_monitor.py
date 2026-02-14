@@ -20,13 +20,13 @@ class MonitorCargadores:
         # Variables de entorno
         self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
-        self.device_id = os.getenv('DEVICE_ID', '64efc6e8-009d-4701-9039-6e793fa95d39')
-        self.latitude = float(os.getenv('LATITUDE', '36.696363'))
-        self.longitude = float(os.getenv('LONGITUDE', '-6.162114'))
+        self.device_id = os.getenv('DEVICE_ID', 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx')
+        self.latitude = float(os.getenv('LATITUDE', '40.4155'))
+        self.longitude = float(os.getenv('LONGITUDE', '-3.7074'))
         self.check_interval = int(os.getenv('CHECK_INTERVAL', '60'))
         
         # IDs de los cargadores (separados por coma en .env)
-        charger_ids_str = os.getenv('CHARGER_IDS', '6103,6115')
+        charger_ids_str = os.getenv('CHARGER_IDS', '1234,5678')
         self.cupr_ids = [int(x.strip()) for x in charger_ids_str.split(',')]
         
         # Control de escaneo

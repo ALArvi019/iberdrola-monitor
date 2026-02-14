@@ -6,17 +6,18 @@ Bot de Telegram para monitorizar, **reservar** y gestionar cargadores eléctrico
 
 ### Modo Público (Sin Login)
 - 🔌 Monitorización en tiempo real de cargadores
-- 📊 Tabla ASCII visual con el estado de todos los cargadores
+- 📊 Vista dinámica agrupada por cargador con estado de cada socket
 - 🔔 Notificaciones automáticas cuando cambia el estado
 - ⏸️ Pausar/reanudar monitorización
 - ⏱️ Intervalo de escaneo configurable (30s a 10min)
 - 💾 Base de datos SQLite para persistencia
 
 ### Modo Autenticado (Con Login)
-- 🔐 Login con OAuth2 + PKCE + MFA por email
-- ⭐ Consultar tus cargadores favoritos
-- 📜 Ver historial de recargas
+- 🔐 Login con OAuth2 + PKCE + MFA por email (via Playwright + Cloudflare Turnstile)
+- 🔌 Ver estado muestra automáticamente todos tus cargadores favoritos
+- ⭐ Consultar tus cargadores favoritos con dirección y alias
 - 🔄 Renovación automática de tokens (sin repetir MFA)
+- 📱 Cambiar versión de la app Iberdrola en runtime (persiste en DB)
 
 ### 🆕 Reservas de Cargadores
 - 📅 **Reservar cargador** desde Telegram
@@ -32,7 +33,7 @@ Bot de Telegram para monitorizar, **reservar** y gestionar cargadores eléctrico
 - 🛑 **Se detiene automáticamente** cuando empiezas a cargar o cancelas
 - ⏰ Mantén tu reserva indefinidamente hasta llegar al cargador
 
-## �🚀 Guía de Configuración Rápida
+## 🚀 Guía de Configuración Rápida
 
 ### 1. Clonar el repositorio
 
@@ -109,8 +110,8 @@ IBERDROLA_PASS=tu_contraseña
 IMAP_USER=tu_email@gmail.com
 IMAP_PASS=tu_app_password_de_google
 
-# Versión de la app Iberdrola (actualizar cuando cambie)
-IBERDROLA_APP_VERSION=4.36.7
+# Versión de la app Iberdrola (también se puede cambiar desde el bot)
+IBERDROLA_APP_VERSION=4.36.8
 
 # Redsys (para pagos de reservas)
 REDSYS_ANDROID_LICENSE=NMQuPUdGvjcP7yLhJHvH
@@ -127,9 +128,9 @@ docker-compose logs -f
 
 ```
 iberdrola-monitor/
-├── bot_monitor.py          # Bot principal de Telegram
+├── bot_monitor.py          # Bot principal de Telegram (estado, reservas, versión)
 ├── iberdrola_api.py        # Cliente API (público + autenticado + reservas)
-├── iberdrola_auth.py       # Módulo de autenticación OAuth2+PKCE+MFA
+├── iberdrola_auth.py       # Autenticación OAuth2+PKCE+MFA con Playwright (Turnstile)
 ├── email_mfa_reader.py     # Lector automático de códigos MFA del email
 ├── redsys_payment.py       # 🆕 Procesador de pagos Redsys con 3D Secure
 ├── reservar_cargador.py    # 🆕 Script CLI para reservar/cancelar
@@ -144,8 +145,7 @@ iberdrola-monitor/
 ├── .env.example            # Plantilla de configuración
 ├── AUTH_REVERSE_ENGINEERING.md  # Documentación técnica
 └── data/                   # Datos persistentes
-    ├── monitor.db          # Base de datos SQLite
-    └── auth_tokens.json    # Tokens de autenticación
+    └── monitor.db          # Base de datos SQLite (estados, tokens, configuración)
 ```
 
 ## 🛠️ Scripts
@@ -158,7 +158,7 @@ Script CLI para gestionar reservas de cargadores.
 python3 reservar_cargador.py
 
 # Reservar cargador específico
-python3 reservar_cargador.py 6103
+python3 reservar_cargador.py 1234
 
 # Ver estado de reservas
 python3 reservar_cargador.py status
@@ -206,7 +206,7 @@ python3 find_chargers.py --radius 0.05
 ```
 
 ### `bot_monitor.py`
-Bot principal de Telegram. Lee la configuración del `.env` y monitoriza los cargadores especificados en `CHARGER_IDS`.
+Bot principal de Telegram. Monitoriza cargadores, gestiona reservas con auto-renovación y permite cambiar la versión de la app en runtime. Si hay autenticación, "Ver Estado" muestra automáticamente los cargadores favoritos; si no, usa los IDs de `CHARGER_IDS`.
 
 ### `iberdrola_api.py`
 Cliente API con soporte para:
@@ -216,9 +216,10 @@ Cliente API con soporte para:
 
 ### `iberdrola_auth.py`
 Módulo de autenticación OAuth2+PKCE+MFA. Gestiona:
-- Login inicial con 2FA
+- Login via Playwright headless (resuelve captcha Cloudflare Turnstile)
+- Fallback a login por requests si Playwright no está disponible
 - Renovación automática de tokens
-- Persistencia de sesión
+- Tokens almacenados en SQLite (tabla `auth_tokens`)
 
 ### `test_auth_api.py`
 Test interactivo del flujo de autenticación:
@@ -244,20 +245,21 @@ Despliega cambios al servidor de producción.
 | `IBERDROLA_PASS` | Contraseña de Iberdrola | ❌ |
 | `IMAP_USER` | Email para leer MFA automático | ❌ |
 | `IMAP_PASS` | App Password de Gmail | ❌ |
-| `IBERDROLA_APP_VERSION` | Versión de la app a emular | ❌ (4.36.7) |
+| `IBERDROLA_APP_VERSION` | Versión de la app a emular (modificable desde el bot) | ❌ (4.36.8) |
 | `REDSYS_ANDROID_LICENSE` | Licencia para pagos Redsys | ❌ |
 
 ## 📱 Comandos del Bot
 
 | Botón | Función |
 |-------|---------|
-| 🔌 Ver Estado | Ver estado actual de todos los cargadores |
+| 🔌 Ver Estado | Ver estado de cargadores (favoritos si autenticado, CHARGER_IDS si no) |
 | 🔄 Forzar Chequeo | Forzar escaneo inmediato |
-| 📅 Reservar | **🆕** Reservar cargador de favoritos |
-| 📋 Mi Reserva | **🆕** Ver/cancelar reserva activa |
+| 📅 Reservar | Reservar cargador de favoritos |
+| 📋 Mi Reserva | Ver/cancelar reserva activa |
 | ⏸️ Pausar/Reanudar | Pausar o reanudar escaneo automático |
 | ⏱️ Cambiar Intervalo | Cambiar intervalo de escaneo |
-| ⭐ Favoritos | Ver cargadores favoritos |
+| ⭐ Favoritos | Ver cargadores favoritos con dirección y alias |
+| 📱 Versión | Cambiar versión de la app Iberdrola en runtime |
 | ℹ️ Info | Ver información del sistema |
 
 ## 📅 Flujo de Reserva
@@ -316,7 +318,7 @@ source venv/bin/activate
 # Instalar dependencias
 pip install -r requirements.txt
 
-# Instalar Playwright (para reservas)
+# Instalar Playwright (para login con Turnstile y pagos 3DS)
 playwright install chromium
 
 # Ejecutar bot
@@ -337,7 +339,8 @@ python bot_monitor.py
 
 ### Token de autenticación expirado
 - El sistema renueva automáticamente usando refresh_token
-- Si falla, elimina `data/auth_tokens.json` y haz login de nuevo
+- Si falla, el bot hace login completo automáticamente (Playwright + MFA por email)
+- Como último recurso, borra la tabla `auth_tokens` de `data/monitor.db`
 
 ### Error en reserva/pago
 - Verifica que tienes una tarjeta guardada en la app Iberdrola
@@ -348,8 +351,9 @@ python bot_monitor.py
 
 El Dockerfile incluye:
 - Python 3.11
-- Playwright con Chromium (para 3D Secure headless)
+- Playwright con Chromium (para login con Turnstile y pagos 3D Secure)
 - Todas las dependencias de sistema para navegador headless
+- Timezone configurado a Europe/Madrid
 
 ```bash
 # Rebuild después de cambios

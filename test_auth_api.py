@@ -124,8 +124,7 @@ def test_api_with_auth(auth):
     
     # Test 3: Estado de un cargador público (sin auth)
     print("\n🔌 Probando consulta pública (sin auth)...")
-    # IKEA Jerez
-    cupr_id = 6103
+    cupr_id = int(os.getenv('CHARGER_IDS', '1234').split(',')[0])
     detalles = api.obtener_detalles_cargador([cupr_id], lat=lat, lon=lon)
     
     if detalles:
