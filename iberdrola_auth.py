@@ -148,12 +148,11 @@ class IberdrolaAuth:
     
     def start_login(self, username: str, password: str):
         """
-        Inicia el proceso de login. 
+        Inicia el proceso de login usando Playwright para resolver captcha Turnstile.
         Devuelve el state para el MFA si se requiere 2FA, o tokens si no.
         """
         self._generate_pkce()
-        
-        # Step 1: Initiate authorization (get initial state)
+
         authorize_url = f"{self.AUTH_BASE_URL}/authorize"
         params = {
             "client_id": self.CLIENT_ID,
@@ -164,43 +163,128 @@ class IberdrolaAuth:
             "code_challenge_method": "S256",
             "audience": "http://eva.iberdrola.com/veappapi/okta/",
         }
-        
-        print("🚀 Iniciando flujo de autenticación...")
-        resp = self.session.get(authorize_url, params=params, allow_redirects=True)
-        
-        # Should land on login page with a state parameter
+        full_url = f"{authorize_url}?{urlencode(params)}"
+
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            print("❌ Playwright no disponible, intentando login sin navegador...")
+            return self._start_login_requests(username, password, full_url)
+
+        print("🚀 Iniciando login con navegador (captcha Turnstile)...")
+
+        headless_mode = os.getenv('DISPLAY') is None
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=headless_mode)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.6668.70 Mobile Safari/537.36"
+            )
+            page = context.new_page()
+
+            try:
+                page.goto(full_url, wait_until='networkidle', timeout=30000)
+                print(f"📍 URL de login: {page.url[:80]}...")
+
+                # Cerrar banner de cookies (OneTrust) si aparece
+                try:
+                    reject_btn = page.locator('#onetrust-reject-all-handler')
+                    if reject_btn.is_visible(timeout=3000):
+                        reject_btn.click()
+                        print("🍪 Banner de cookies cerrado")
+                        page.wait_for_timeout(500)
+                except Exception:
+                    pass
+
+                # Rellenar credenciales
+                page.fill('input[name="username"]', username)
+                page.fill('input[name="password"]', password)
+
+                # Esperar a que Turnstile resuelva el captcha
+                try:
+                    page.wait_for_function(
+                        '() => { const el = document.querySelector("input[name=captcha]"); return el && el.value !== ""; }',
+                        timeout=20000
+                    )
+                    print("✅ Captcha resuelto")
+                except Exception:
+                    print("⚠️ Timeout en captcha, intentando submit igualmente...")
+
+                # Submit
+                print("🔑 Enviando credenciales...")
+                page.locator('button[name="action"][value="default"]').filter(has_text="Entrar").last.click(force=True)
+
+                # Esperar redirección a MFA, callback, o error
+                try:
+                    page.wait_for_url(
+                        lambda url: '/u/mfa' in url or 'code=' in url or 'rv://' in url,
+                        timeout=30000
+                    )
+                except Exception:
+                    # Comprobar si hay error en la página
+                    error_el = page.query_selector('.ulp-input-error-message')
+                    error_msg = error_el.inner_text() if error_el else page.url
+                    print(f"⚠️ Login falló: {error_msg}")
+                    browser.close()
+                    return None
+
+                result_url = page.url
+
+                # Transferir cookies a la session de requests (para MFA posterior)
+                for cookie in context.cookies():
+                    self.session.cookies.set(
+                        cookie['name'], cookie['value'],
+                        domain=cookie.get('domain', '').lstrip('.'),
+                        path=cookie.get('path', '/')
+                    )
+
+            except Exception as e:
+                print(f"❌ Error en login con navegador: {e}")
+                browser.close()
+                return None
+
+            browser.close()
+
+        # Procesar resultado
+        if "/u/mfa-email-challenge" in result_url:
+            print("📧 Se requiere verificación por email (MFA)")
+            mfa_state = parse_qs(urlparse(result_url).query).get('state', [None])[0]
+            return {"status": "mfa_required", "mfa_state": mfa_state, "mfa_url": result_url}
+
+        if "code=" in result_url:
+            return self._handle_callback(result_url)
+
+        print(f"⚠️ Estado inesperado: {result_url}")
+        return None
+
+    def _start_login_requests(self, username, password, authorize_url):
+        """Fallback: login sin navegador (funciona si no hay captcha)."""
+        print("🚀 Iniciando flujo de autenticación (sin navegador)...")
+        resp = self.session.get(authorize_url, allow_redirects=True)
+
         login_url = resp.url
         print(f"📍 URL de login: {login_url[:80]}...")
-        
-        # Extract state from URL
-        parsed = urlparse(login_url)
-        state = parse_qs(parsed.query).get('state', [None])[0]
-        
+
+        state = parse_qs(urlparse(login_url).query).get('state', [None])[0]
         if not state:
             print("❌ No se pudo obtener el state inicial")
             return None
-        
-        # Step 2: Submit credentials
+
         print("🔑 Enviando credenciales...")
-        login_post_url = f"{self.AUTH_BASE_URL}/u/login?state={state}"
-        form_data = {
-            "state": state,
-            "username": username,
-            "password": password,
-        }
-        
-        resp = self.session.post(login_post_url, data=form_data, allow_redirects=True)
-        
-        # Check if we got redirected to MFA challenge
+        form_data = {"state": state, "username": username, "password": password}
+        resp = self.session.post(
+            f"{self.AUTH_BASE_URL}/u/login?state={state}",
+            data=form_data, allow_redirects=True
+        )
+
         if "/u/mfa-email-challenge" in resp.url:
             print("📧 Se requiere verificación por email (MFA)")
             mfa_state = parse_qs(urlparse(resp.url).query).get('state', [None])[0]
             return {"status": "mfa_required", "mfa_state": mfa_state, "mfa_url": resp.url}
-        
-        # Check if we got the authorization code directly (no MFA)
+
         if "code=" in resp.url:
             return self._handle_callback(resp.url)
-        
+
         print(f"⚠️ Estado inesperado: {resp.url}")
         return None
     

@@ -202,16 +202,19 @@ class MonitorCargadores:
                 self._save_auth_to_db()
                 return True, None
         
-        # Necesita login completo con MFA
+        # Necesita login completo con MFA (ejecutar en thread para Playwright)
         print("🔐 Iniciando login con MFA...")
         username = os.getenv("IBERDROLA_USER")
         password = os.getenv("IBERDROLA_PASS")
-        
-        result = self.auth.start_login(username, password)
-        
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: self.auth.start_login(username, password)
+        )
+
         if not result:
             return False, "Error iniciando login"
-        
+
         if result.get("status") == "mfa_required":
             # Intentar leer código del email automáticamente
             otp = None
@@ -219,14 +222,18 @@ class MonitorCargadores:
                 try:
                     from email_mfa_reader import get_mfa_code_from_email
                     print("📧 Leyendo código MFA del email...")
-                    otp = get_mfa_code_from_email(max_wait_seconds=90)
+                    otp = await loop.run_in_executor(
+                        None, lambda: get_mfa_code_from_email(max_wait_seconds=90)
+                    )
                 except Exception as e:
                     print(f"⚠️ Error leyendo email: {e}")
-            
+
             if not otp:
                 return False, "No se pudo obtener el código MFA automáticamente. Configura IMAP_USER e IMAP_PASS."
-            
-            result = self.auth.submit_mfa_code(result["mfa_state"], otp)
+
+            result = await loop.run_in_executor(
+                None, lambda: self.auth.submit_mfa_code(result["mfa_state"], otp)
+            )
         
         if result and result.get("status") == "success":
             self._save_auth_to_db()
