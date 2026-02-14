@@ -5,9 +5,8 @@ Escanea periódicamente y notifica cambios de estado
 """
 
 import os
-import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import asyncio
@@ -145,7 +144,6 @@ class MonitorCargadores:
             self.auth.refresh_token = row[1]
             self.auth.id_token = row[2]
             if row[3]:
-                from datetime import datetime
                 self.auth.token_expiry = datetime.fromisoformat(row[3])
             
             # Actualizar API con auth manager y callback de auth failure
@@ -330,50 +328,8 @@ class MonitorCargadores:
         
         return cambios
     
-    def formatear_tabla_ascii(self, conectores):
-        """Formatea una tabla ASCII con el estado de los 4 cargadores"""
-        status_emoji = {
-            'AVAILABLE': '✅',
-            'OCCUPIED': '🔴',
-            'RESERVED': '🟡',
-            'OUT_OF_SERVICE': '⚠️',
-            'UNKNOWN': '❓'
-        }
-        
-        # Organizar conectores por cuprName y socketCode
-        tabla = {}
-        for con in conectores:
-            cupr_name = con.get('cuprName', '')
-            socket_code = con.get('socketCode', '')
-            status = con.get('status', 'UNKNOWN')
-            emoji = status_emoji.get(status, '❓')
-            
-            # Extraer número del cargador (001, 002, etc.)
-            cupr_num = cupr_name.split()[-1] if cupr_name else '???'
-            # Crear clave como "001-1", "001-2", etc.
-            key = f"{cupr_num}-{socket_code}"
-            tabla[key] = f"{emoji} {status}"
-        
-        # Crear tabla ASCII
-        mensaje = "```\n"
-        mensaje += "┌─────────────────────┬─────────────────────┐\n"
-        
-        # Ajustar el padding dinámicamente
-        val_001_1 = tabla.get('001-1', '❓ UNKNOWN')
-        val_002_1 = tabla.get('002-1', '❓ UNKNOWN')
-        val_001_2 = tabla.get('001-2', '❓ UNKNOWN')
-        val_002_2 = tabla.get('002-2', '❓ UNKNOWN')
-        
-        mensaje += f"│  001-1: {val_001_1:<12} │  002-1: {val_002_1:<12} │\n"
-        mensaje += "├─────────────────────┼─────────────────────┤\n"
-        mensaje += f"│  001-2: {val_001_2:<12} │  002-2: {val_002_2:<12} │\n"
-        mensaje += "└─────────────────────┴─────────────────────┘\n"
-        mensaje += "```"
-        
-        return mensaje
-    
     def formatear_mensaje_estado(self, conectores):
-        """Formatea el mensaje con el estado de los conectores"""
+        """Formatea el mensaje con el estado de los conectores, agrupados por cargador"""
         status_emoji = {
             'AVAILABLE': '✅',
             'OCCUPIED': '🔴',
@@ -381,26 +337,36 @@ class MonitorCargadores:
             'OUT_OF_SERVICE': '⚠️',
             'UNKNOWN': '❓'
         }
-        
-        mensaje = "🔌 *ESTADO DE CARGADORES IKEA JEREZ*\n\n"
-        mensaje += f"📍 Lat: {self.latitude}, Lon: {self.longitude}\n"
-        mensaje += f"🕐 Actualizado: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n\n"
-        
-        # Tabla ASCII
-        mensaje += self.formatear_tabla_ascii(conectores)
-        mensaje += "\n"
-        
-        # Resumen
-        estados_count = {}
+
+        mensaje = f"🔌 *ESTADO DE CARGADORES*\n"
+        mensaje += f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n\n"
+
+        # Agrupar conectores por cargador (cuprName)
+        cargadores = {}
         for con in conectores:
-            estado = con['status']
-            estados_count[estado] = estados_count.get(estado, 0) + 1
-        
-        mensaje += "\n📊 *RESUMEN*\n"
+            nombre = con.get('cuprName', 'Sin nombre')
+            cargadores.setdefault(nombre, []).append(con)
+
+        estados_count = {}
+        for nombre, sockets in cargadores.items():
+            mensaje += f"📍 *{nombre}*\n"
+            for con in sockets:
+                status = con.get('status', 'UNKNOWN')
+                emoji = status_emoji.get(status, '❓')
+                socket_code = con.get('socketCode', '?')
+                socket_type = con.get('socketType', '')
+                mensaje += f"  {emoji} Socket {socket_code} ({socket_type}) — `{status}`\n"
+                estados_count[status] = estados_count.get(status, 0) + 1
+            mensaje += "\n"
+
+        # Resumen
+        mensaje += "📊 *RESUMEN:* "
+        resumen_parts = []
         for estado, count in estados_count.items():
             emoji = status_emoji.get(estado, '❓')
-            mensaje += f"{emoji} {estado}: {count}\n"
-        
+            resumen_parts.append(f"{emoji}{count}")
+        mensaje += " ".join(resumen_parts)
+
         return mensaje
     
     def formatear_mensaje_cambio(self, cambios, todos_conectores):
@@ -438,7 +404,7 @@ class MonitorCargadores:
         # Mostrar estado de todos los cargadores
         mensaje += "─" * 30 + "\n"
         mensaje += "*ESTADO ACTUAL DE TODOS:*\n\n"
-        mensaje += self.formatear_tabla_ascii(todos_conectores)
+        mensaje += self.formatear_mensaje_estado(todos_conectores)
         
         return mensaje
     
@@ -548,28 +514,40 @@ class MonitorCargadores:
             )
     
     async def ver_estado(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Muestra el estado de los cargadores"""
+        """Muestra el estado de los cargadores (favoritos si hay auth, sino CHARGER_IDS)"""
         await update.message.reply_text("⏳ Consultando estado...")
-        
+
+        cupr_ids = list(self.cupr_ids)
+
+        # Intentar obtener IDs de favoritos si hay autenticación
+        authenticated, _ = await self.ensure_authenticated()
+        if authenticated:
+            favoritos = self.api.obtener_favoritos(lat=self.latitude, lon=self.longitude)
+            if favoritos:
+                fav_ids = []
+                for fav in favoritos:
+                    cupr_id = fav.get('locationData', {}).get('cuprId')
+                    if cupr_id and cupr_id not in fav_ids:
+                        fav_ids.append(cupr_id)
+                if fav_ids:
+                    cupr_ids = fav_ids
+
         conectores = self.api.obtener_estado_conectores(
-            self.cupr_ids,
-            self.latitude,
-            self.longitude
+            cupr_ids, self.latitude, self.longitude
         )
-        
+
         if conectores:
             mensaje = self.formatear_mensaje_estado(conectores)
             try:
                 await update.message.reply_text(
-                    mensaje, 
+                    mensaje,
                     parse_mode='Markdown',
                     reply_markup=self.get_main_keyboard()
                 )
             except Exception as e:
-                # Si falla el Markdown, enviar sin formato
                 print(f"⚠️ Error Markdown, enviando sin formato: {e}")
                 await update.message.reply_text(
-                    mensaje.replace('*', '').replace('`', '').replace('_', ''), 
+                    mensaje.replace('*', '').replace('`', '').replace('_', ''),
                     reply_markup=self.get_main_keyboard()
                 )
         else:
@@ -932,7 +910,6 @@ class MonitorCargadores:
         
         # Formatear fechas
         try:
-            from datetime import datetime
             start_dt = datetime.fromisoformat(start_date.replace('+00:00', '+00:00'))
             end_dt = datetime.fromisoformat(end_date.replace('+00:00', '+00:00'))
             start_str = start_dt.strftime('%H:%M')
@@ -999,7 +976,6 @@ class MonitorCargadores:
                 await query.edit_message_text(f"💳 Procesando pago (Order: {order_id})...\n\n📱 Aprueba el pago en tu app bancaria si es necesario.")
             
             # 3. Procesar pago (ejecutar en thread para no bloquear)
-            import asyncio
             loop = asyncio.get_event_loop()
             payment_success = await loop.run_in_executor(
                 None,
@@ -1027,7 +1003,6 @@ class MonitorCargadores:
                 
                 end_date = result.get('endDate', 'N/A')
                 try:
-                    from datetime import datetime
                     end_dt = datetime.fromisoformat(end_date.replace('+00:00', '+00:00'))
                     end_str = end_dt.strftime('%H:%M')
                 except:
@@ -1040,7 +1015,6 @@ class MonitorCargadores:
                     self.auto_renew_socket_id = socket_id
                     
                     # Calcular próxima renovación
-                    from datetime import datetime, timedelta
                     self.auto_renew_next_time = datetime.now() + timedelta(minutes=self.RENEW_INTERVAL_MINUTES)
                     next_renew_str = self.auto_renew_next_time.strftime('%H:%M')
                     
@@ -1200,7 +1174,6 @@ class MonitorCargadores:
             
             if success:
                 print("   ✅ Reserva renovada correctamente")
-                from datetime import datetime, timedelta
                 self.auto_renew_next_time = datetime.now() + timedelta(minutes=self.RENEW_INTERVAL_MINUTES)
                 next_renew_str = self.auto_renew_next_time.strftime('%H:%M')
                 
@@ -1278,7 +1251,6 @@ class MonitorCargadores:
         except Exception as e:
             print(f"❌ Error enviando notificación: {e}")
 
-    
     async def run_schedule_loop(self):
         """Ejecuta el schedule de forma asíncrona"""
         # Primer chequeo después de 10 segundos
