@@ -63,22 +63,42 @@ def get_charger_ids():
 def find_available_socket(api, cupr_ids, lat, lon):
     """Busca un conector disponible en los cargadores especificados."""
     print(f"🔍 Buscando conector disponible en cargadores: {cupr_ids}")
-    
+
+    preferred_type = os.getenv('PREFERRED_CONNECTOR_TYPE', '').strip()
+    if preferred_type:
+        print(f"   Preferencia de conector: {preferred_type}")
+
     conectores = api.obtener_estado_conectores(cupr_ids, lat=lat, lon=lon)
-    
+
     if not conectores:
         print("❌ Error obteniendo estado de conectores")
         return None, None, None
-    
+
+    available = []
     for c in conectores:
         status = c['status']
-        print(f"   {c['cuprId']} - {c['cuprName']} - Socket {c['physicalSocketId']}: {status}")
-        
+        socket_type = c.get('socketType', '')
+        print(f"   {c['cuprId']} - {c['cuprName']} - Socket {c['physicalSocketId']} ({socket_type}): {status}")
+
         if status == 'AVAILABLE':
+            available.append(c)
+
+    if not available:
+        print("❌ No hay conectores disponibles")
+        return None, None, None
+
+    # Priorizar el tipo de conector preferido
+    if preferred_type:
+        preferred = [c for c in available if c.get('socketType', '').lower() == preferred_type.lower()]
+        if preferred:
+            c = preferred[0]
+            print(f"   ✅ Seleccionado conector preferido: {c.get('socketType', '')}")
             return c['cuprId'], c['physicalSocketId'], c['cuprName']
-    
-    print("❌ No hay conectores disponibles")
-    return None, None, None
+        else:
+            print(f"   ⚠️ No hay conector '{preferred_type}' disponible, usando alternativa")
+
+    c = available[0]
+    return c['cuprId'], c['physicalSocketId'], c['cuprName']
 
 
 def reservar(cupr_ids=None):

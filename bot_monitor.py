@@ -855,20 +855,28 @@ class MonitorCargadores:
         conectores = self.api.obtener_estado_conectores(cupr_ids_disponibles, lat=self.latitude, lon=self.longitude)
         
         if conectores:
-            for c in conectores:
-                if c.get('status') == 'AVAILABLE':
-                    cupr_id = c.get('cuprId')
-                    socket_id = c.get('physicalSocketId')
-                    nombre = c.get('cuprName', 'Sin nombre')
-                    socket_type = c.get('socketType', '')
-                    
-                    mensaje += f"✅ *{nombre}*\n   Socket {socket_id} ({socket_type})\n\n"
-                    buttons.append([
-                        InlineKeyboardButton(
-                            f"🔌 {nombre[:25]}",
-                            callback_data=f"reserve_{cupr_id}_{socket_id}"
-                        )
-                    ])
+            preferred_type = os.getenv('PREFERRED_CONNECTOR_TYPE', '').strip()
+            available = [c for c in conectores if c.get('status') == 'AVAILABLE']
+
+            # Priorizar tipo preferido: primero los preferidos, luego el resto
+            if preferred_type:
+                available.sort(key=lambda c: 0 if c.get('socketType', '').lower() == preferred_type.lower() else 1)
+
+            for c in available:
+                cupr_id = c.get('cuprId')
+                socket_id = c.get('physicalSocketId')
+                nombre = c.get('cuprName', 'Sin nombre')
+                socket_type = c.get('socketType', '')
+                is_preferred = preferred_type and socket_type.lower() == preferred_type.lower()
+                label_prefix = "⭐" if is_preferred else "🔌"
+
+                mensaje += f"✅ *{nombre}*\n   Socket {socket_id} ({socket_type}){' ⭐' if is_preferred else ''}\n\n"
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"{label_prefix} {nombre[:25]} ({socket_type})",
+                        callback_data=f"reserve_{cupr_id}_{socket_id}"
+                    )
+                ])
         
         if not buttons:
             await update.message.reply_text(
