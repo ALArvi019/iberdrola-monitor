@@ -5,8 +5,13 @@ Escanea periódicamente y notifica cambios de estado
 """
 
 import os
+import random
+import signal
 import sqlite3
 from datetime import datetime, timedelta
+
+# Reap zombie child processes (Chromium headless_shell) automatically
+signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import asyncio
@@ -24,13 +29,23 @@ class MonitorCargadores:
         self.latitude = float(os.getenv('LATITUDE', '40.4155'))
         self.longitude = float(os.getenv('LONGITUDE', '-3.7074'))
         self.check_interval = int(os.getenv('CHECK_INTERVAL', '60'))
-        
+
+        # Jitter: desviación aleatoria sobre el intervalo para que los escaneos
+        # no caigan siempre en el mismo segundo (evita un patrón regular obvio).
+        # SCAN_JITTER_PCT: porcentaje del intervalo (0 = desactivado)
+        # SCAN_JITTER_MIN: desviación mínima en segundos
+        self.jitter_pct = float(os.getenv('SCAN_JITTER_PCT', '15')) / 100
+        self.jitter_min_seconds = float(os.getenv('SCAN_JITTER_MIN', '5'))
+        # Generador no determinista (no depende de la semilla global)
+        self._rand = random.SystemRandom()
+
         # IDs de los cargadores (separados por coma en .env)
         charger_ids_str = os.getenv('CHARGER_IDS', '1234,5678')
         self.cupr_ids = [int(x.strip()) for x in charger_ids_str.split(',')]
         
         # Control de escaneo
         self.scanning_paused = False
+        self.next_scan_time = None  # Hora estimada del próximo escaneo
         
         # API de Iberdrola (sin auth inicialmente)
         self.api = IberdrolaAPI(device_id=self.device_id)
@@ -440,6 +455,9 @@ class MonitorCargadores:
                     if fav_ids:
                         cupr_ids = fav_ids
 
+                # Pausa corta y variable entre peticiones del mismo ciclo
+                await asyncio.sleep(self._rand.uniform(0.4, 2.5))
+
             # Obtener estado actual
             conectores = self.api.obtener_estado_conectores(
                 cupr_ids,
@@ -679,8 +697,11 @@ class MonitorCargadores:
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         mensaje = f"⏱️ *Cambiar Intervalo de Escaneo*\n\n"
-        mensaje += f"Intervalo actual: *{self.check_interval}s* ({self.check_interval//60} min)\n\n"
-        mensaje += "Selecciona el nuevo intervalo:"
+        mensaje += f"Intervalo actual: *{self.check_interval}s* ({self.check_interval//60} min)\n"
+        amplitud = self.jitter_amplitude()
+        if amplitud > 0:
+            mensaje += f"Variación aleatoria: *±{amplitud:.0f}s*\n"
+        mensaje += "\nSelecciona el nuevo intervalo:"
         
         await update.message.reply_text(mensaje, parse_mode='Markdown', reply_markup=reply_markup)
     
@@ -690,6 +711,11 @@ class MonitorCargadores:
         mensaje += f"📍 Ubicación: {self.latitude}, {self.longitude}\n"
         mensaje += f"🔌 Cargadores: {', '.join(map(str, self.cupr_ids))}\n"
         mensaje += f"⏱️ Intervalo: {self.check_interval}s ({self.check_interval//60} min)\n"
+        amplitud = self.jitter_amplitude()
+        if amplitud > 0:
+            mensaje += f"🎲 Variación: ±{amplitud:.0f}s\n"
+        if self.next_scan_time and not self.scanning_paused:
+            mensaje += f"⏭️ Próximo escaneo: {self.next_scan_time.strftime('%H:%M:%S')}\n"
         mensaje += f"🔄 Estado: {'⏸️ PAUSADO' if self.scanning_paused else '▶️ ACTIVO'}\n"
         mensaje += f"📱 Versión app: `{self.app_version}`\n"
         mensaje += f"💾 Base de datos: {self.db_path}\n"
@@ -1132,8 +1158,9 @@ class MonitorCargadores:
         print(f"🔄 Auto-renovación iniciada (cada {self.RENEW_INTERVAL_MINUTES} minutos)")
         
         while self.auto_renew_active:
-            # Esperar el intervalo de renovación
-            await asyncio.sleep(self.RENEW_INTERVAL_MINUTES * 60)
+            # Esperar el intervalo de renovación. El jitter aquí solo resta
+            # tiempo: adelantarse es seguro, pasarse de los 15 min gratis no.
+            await asyncio.sleep(self.RENEW_INTERVAL_MINUTES * 60 - self._rand.uniform(0, 30))
             
             if not self.auto_renew_active:
                 break
@@ -1273,18 +1300,38 @@ class MonitorCargadores:
         except Exception as e:
             print(f"❌ Error enviando notificación: {e}")
 
+    def jitter_amplitude(self):
+        """Amplitud (en segundos) de la desviación aleatoria del intervalo"""
+        if self.jitter_pct <= 0 and self.jitter_min_seconds <= 0:
+            return 0.0
+        amplitud = max(self.check_interval * self.jitter_pct, self.jitter_min_seconds)
+        # Nunca desviar más de la mitad del intervalo (evita esperas ~0 o dobles)
+        return min(amplitud, self.check_interval / 2)
+
+    def proxima_espera(self):
+        """Intervalo + desviación aleatoria, en segundos (float)"""
+        amplitud = self.jitter_amplitude()
+        if amplitud <= 0:
+            return float(self.check_interval)
+        # Uniforme en [-amplitud, +amplitud]: la media sigue siendo check_interval
+        # y el resultado es fraccionario, así que tampoco se repite el mismo segundo.
+        return max(5.0, self.check_interval + self._rand.uniform(-amplitud, amplitud))
+
     async def run_schedule_loop(self):
         """Ejecuta el schedule de forma asíncrona"""
-        # Primer chequeo después de 10 segundos
-        await asyncio.sleep(10)
+        # Primer chequeo tras un arranque aleatorio (no siempre a los 10s)
+        await asyncio.sleep(self._rand.uniform(5, 20))
         print("🚀 Ejecutando primer chequeo...")
         await self.chequear_cargadores()
-        
-        print(f"⏰ Scheduler iniciado (cada {self.check_interval//60} minutos)")
-        
+
+        amplitud = self.jitter_amplitude()
+        print(f"⏰ Scheduler iniciado (cada {self.check_interval}s ±{amplitud:.0f}s)")
+
         # Loop infinito para chequeos periódicos
         while True:
-            await asyncio.sleep(self.check_interval)
+            espera = self.proxima_espera()
+            self.next_scan_time = datetime.now() + timedelta(seconds=espera)
+            await asyncio.sleep(espera)
             await self.chequear_cargadores()
     
     async def run(self):
