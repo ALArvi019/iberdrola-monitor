@@ -232,7 +232,19 @@ python3 test_auth_api.py
 ```
 
 ### `deploy.sh`
-Despliega cambios al servidor de producción.
+Despliega cambios al servidor de producción. El destino se configura con variables
+de entorno, para no tener que editar el script ni guardar datos de tu máquina en el
+repositorio:
+
+```bash
+REMOTE_USER=pi REMOTE_HOST=192.168.1.50 ./deploy.sh
+```
+
+| Variable | Descripción | Por defecto |
+|----------|-------------|-------------|
+| `REMOTE_USER` | Usuario SSH del servidor | `pi` |
+| `REMOTE_HOST` | Host o IP del servidor | `raspberrypi.local` |
+| `REMOTE_PATH` | Ruta del proyecto en el servidor | `/home/pi/stacks/iberdrola-monitor/` |
 
 ## ⚙️ Variables de Entorno
 
