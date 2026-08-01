@@ -5,8 +5,12 @@ Escanea periódicamente y notifica cambios de estado
 """
 
 import os
+import signal
 import sqlite3
 from datetime import datetime, timedelta
+
+# Reap zombie child processes (Chromium headless_shell) automatically
+signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import asyncio
