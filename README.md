@@ -102,6 +102,10 @@ LONGITUDE=-3.7038
 # Intervalo de escaneo (segundos)
 CHECK_INTERVAL=60
 
+# Variación aleatoria del intervalo (anti-patrón)
+SCAN_JITTER_PCT=15
+SCAN_JITTER_MIN=5
+
 # Autenticación (para favoritos y reservas)
 IBERDROLA_USER=tu_email@example.com
 IBERDROLA_PASS=tu_contraseña
@@ -241,6 +245,8 @@ Despliega cambios al servidor de producción.
 | `LATITUDE` | Latitud de tu ubicación | ✅ |
 | `LONGITUDE` | Longitud de tu ubicación | ✅ |
 | `CHECK_INTERVAL` | Intervalo de escaneo (segundos) | ❌ (60) |
+| `SCAN_JITTER_PCT` | Variación aleatoria del intervalo, en % (0 = desactivado) | ❌ (15) |
+| `SCAN_JITTER_MIN` | Variación mínima en segundos | ❌ (5) |
 | `IBERDROLA_USER` | Email de Iberdrola (para auth) | ❌ |
 | `IBERDROLA_PASS` | Contraseña de Iberdrola | ❌ |
 | `IMAP_USER` | Email para leer MFA automático | ❌ |
