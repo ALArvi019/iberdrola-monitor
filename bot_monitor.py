@@ -20,6 +20,18 @@ from iberdrola_api import IberdrolaAPI
 from iberdrola_auth import IberdrolaAuth
 
 
+# Estados que devuelve la API de Iberdrola. EV_CONNECTED es el coche enchufado pero sin
+# cargar, y faltaba, asi que salia como interrogacion en las notificaciones.
+STATUS_EMOJI = {
+    'AVAILABLE': '✅',
+    'OCCUPIED': '🔴',
+    'EV_CONNECTED': '🔌',
+    'RESERVED': '🟡',
+    'OUT_OF_SERVICE': '⚠️',
+    'UNKNOWN': '❓',
+}
+
+
 class MonitorCargadores:
     def __init__(self):
         # Variables de entorno
@@ -44,6 +56,7 @@ class MonitorCargadores:
         self.cupr_ids = [int(x.strip()) for x in charger_ids_str.split(',')]
         
         # Control de escaneo
+        self._scan_lock = asyncio.Lock()
         self.scanning_paused = False
         self.next_scan_time = None  # Hora estimada del próximo escaneo
         
@@ -271,23 +284,33 @@ class MonitorCargadores:
             self.auth.token_expiry = None
             # Mantenemos refresh_token por si aún sirve
     
-    def guardar_estado(self, conectores):
-        """Guarda el estado actual en la base de datos"""
+    def guardar_estado(self, conectores, notificado=True):
+        """Guarda el estado actual en la base de datos.
+
+        Con notificado=False se anota que el escaneo ocurrio, pero se conserva el
+        `status` anterior, que es contra el que se comparan los cambios. Asi un cambio
+        que no se ha podido avisar se vuelve a detectar en el siguiente escaneo en vez
+        de darse por visto y desaparecer.
+        """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
+        anteriores = {} if notificado else self.obtener_estado_anterior()
+
         for con in conectores:
+            socket_id = con['physicalSocketId']
+            estado = anteriores.get(socket_id, con['status']) if not notificado else con['status']
             cursor.execute('''
                 INSERT OR REPLACE INTO estado_conectores 
                 (physicalSocketId, cuprId, cuprName, cpId, socketType, status, lastUpdate, lastCheck)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                con['physicalSocketId'],
+                socket_id,
                 con['cuprId'],
                 con['cuprName'],
                 con['cpId'],
                 con['socketType'],
-                con['status'],
+                estado,
                 con['statusUpdateDate'],
                 datetime.now().isoformat()
             ))
@@ -345,13 +368,7 @@ class MonitorCargadores:
     
     def formatear_mensaje_estado(self, conectores):
         """Formatea el mensaje con el estado de los conectores, agrupados por cargador"""
-        status_emoji = {
-            'AVAILABLE': '✅',
-            'OCCUPIED': '🔴',
-            'RESERVED': '🟡',
-            'OUT_OF_SERVICE': '⚠️',
-            'UNKNOWN': '❓'
-        }
+        status_emoji = STATUS_EMOJI
 
         mensaje = f"🔌 *ESTADO DE CARGADORES*\n"
         mensaje += f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n\n"
@@ -386,13 +403,7 @@ class MonitorCargadores:
     
     def formatear_mensaje_cambio(self, cambios, todos_conectores):
         """Formatea el mensaje de notificación de cambios incluyendo el estado de todos"""
-        status_emoji = {
-            'AVAILABLE': '✅',
-            'OCCUPIED': '🔴',
-            'RESERVED': '🟡',
-            'OUT_OF_SERVICE': '⚠️',
-            'UNKNOWN': '❓'
-        }
+        status_emoji = STATUS_EMOJI
         
         mensaje = "🔔 *¡CAMBIO DE ESTADO DETECTADO!*\n\n"
         mensaje += f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n\n"
@@ -412,9 +423,13 @@ class MonitorCargadores:
             cupr_num = cupr_name.split()[-1] if cupr_name else '???'
             display_name = f"{cupr_num}-{socket_code}"
             
+            # Los estados van entre acentos graves a proposito. Varios llevan guion
+            # bajo (EV_CONNECTED, OUT_OF_SERVICE) y en el Markdown de Telegram un guion
+            # bajo suelto abre una cursiva que nunca se cierra: el mensaje entero se
+            # rechaza con "can't find end of the entity" y el aviso no llega.
             mensaje += f"🏪 *{con['cuprName']}*\n"
             mensaje += f"🔌 Socket {display_name} ({con['socketType']})\n"
-            mensaje += f"{emoji_ant} ~~{ant}~~ → {emoji_nue} *{nue}*\n\n"
+            mensaje += f"{emoji_ant} `{ant}` → {emoji_nue} `{nue}`\n\n"
         
         # Mostrar estado de todos los cargadores
         mensaje += "─" * 30 + "\n"
@@ -424,7 +439,12 @@ class MonitorCargadores:
         return mensaje
     
     async def enviar_mensaje(self, mensaje, parse_mode='Markdown'):
-        """Envía un mensaje a Telegram"""
+        """Envía un mensaje a Telegram. Devuelve True si llegó.
+
+        Si falla el formato, se reintenta en texto plano. Un aviso feo llega; un aviso
+        que no sale no sirve de nada, y el estado del cargador ya habrá cambiado otra
+        vez cuando alguien se de cuenta.
+        """
         try:
             await self.app.bot.send_message(
                 chat_id=self.chat_id,
@@ -432,20 +452,48 @@ class MonitorCargadores:
                 parse_mode=parse_mode
             )
             print(f"✅ Mensaje enviado a Telegram")
+            return True
         except Exception as e:
             print(f"❌ Error al enviar mensaje: {e}")
+
+        if parse_mode is None:
+            return False
+
+        try:
+            await self.app.bot.send_message(
+                chat_id=self.chat_id,
+                text=mensaje,
+                parse_mode=None
+            )
+            print("✅ Mensaje enviado sin formato")
+            return True
+        except Exception as e:
+            print(f"❌ Tampoco se pudo enviar sin formato: {e}")
+            return False
     
     async def chequear_cargadores(self):
         """Chequea el estado de los cargadores y notifica cambios"""
         if self.scanning_paused:
             return
 
+        if self._scan_lock.locked():
+            # Ya hay un chequeo en marcha, normalmente por el boton de forzar mientras
+            # corria el periodico. Dos a la vez se pisarian el estado guardado.
+            print("⏭️  Ya hay un chequeo en curso, se omite este")
+            return
+
+        async with self._scan_lock:
+            await self._chequear_cargadores()
+
+    async def _chequear_cargadores(self):
         try:
             # Usar favoritos si hay autenticación, sino CHARGER_IDS
             cupr_ids = list(self.cupr_ids)
             authenticated, _ = await self.ensure_authenticated()
             if authenticated:
-                favoritos = self.api.obtener_favoritos(lat=self.latitude, lon=self.longitude)
+                favoritos = await asyncio.to_thread(
+                    self.api.obtener_favoritos, lat=self.latitude, lon=self.longitude
+                )
                 if favoritos:
                     fav_ids = []
                     for fav in favoritos:
@@ -459,10 +507,11 @@ class MonitorCargadores:
                 await asyncio.sleep(self._rand.uniform(0.4, 2.5))
 
             # Obtener estado actual
-            conectores = self.api.obtener_estado_conectores(
+            conectores = await asyncio.to_thread(
+                self.api.obtener_estado_conectores,
                 cupr_ids,
                 self.latitude,
-                self.longitude
+                self.longitude,
             )
             
             if not conectores:
@@ -471,13 +520,19 @@ class MonitorCargadores:
             
             # Detectar cambios
             cambios = self.detectar_cambios(conectores)
-            
+
+            notificado = True
             if cambios:
                 mensaje = self.formatear_mensaje_cambio(cambios, conectores)
-                await self.enviar_mensaje(mensaje)
-            
-            # Guardar nuevo estado
-            self.guardar_estado(conectores)
+                notificado = await self.enviar_mensaje(mensaje)
+
+            # Guardar nuevo estado. Si el aviso no ha salido, el estado nuevo NO se
+            # graba: si se grabara, el siguiente ciclo ya no veria ninguna diferencia y
+            # ese cambio no se avisaria nunca. Dejandolo, se reintenta cada ciclo hasta
+            # que Telegram lo acepte.
+            self.guardar_estado(conectores, notificado=notificado)
+            if not notificado:
+                print("⚠️  Cambio sin avisar, se reintenta en el proximo escaneo")
             
         except Exception as e:
             print(f"❌ Error al chequear: {e}")
@@ -621,13 +676,7 @@ class MonitorCargadores:
             return
         
         # Formatear mensaje con favoritos
-        status_emoji = {
-            'AVAILABLE': '✅',
-            'OCCUPIED': '🔴',
-            'RESERVED': '🟡',
-            'OUT_OF_SERVICE': '⚠️',
-            'UNKNOWN': '❓'
-        }
+        status_emoji = STATUS_EMOJI
         
         mensaje = "⭐ *TUS CARGADORES FAVORITOS*\n\n"
         
