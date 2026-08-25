@@ -311,6 +311,7 @@ Para cancelar: **📋 Mi Reserva → Cancelar Reserva**
 |-------|--------|-------------|
 | ✅ | AVAILABLE | Cargador disponible |
 | 🔴 | OCCUPIED | Cargador en uso |
+| 🔌 | EV_CONNECTED | Coche enchufado, sin cargar |
 | 🟡 | RESERVED | Cargador reservado |
 | ⚠️ | OUT_OF_SERVICE | Fuera de servicio |
 | ❓ | UNKNOWN | Estado desconocido |
@@ -359,6 +360,27 @@ python bot_monitor.py
 - El sistema renueva automáticamente usando refresh_token
 - Si falla, el bot hace login completo automáticamente (Playwright + MFA por email)
 - Como último recurso, borra la tabla `auth_tokens` de `data/monitor.db`
+
+### El bot tarda muchisimo en avisar de un cambio
+Casi siempre no es el escaneo, que va cada `CHECK_INTERVAL` segundos con su desviacion,
+sino el aviso, que se pierde. Comprobar primero cada cuanto escanea de verdad:
+
+```bash
+docker exec iberdrola-monitor python3 -c "import sqlite3;print(sqlite3.connect('/app/data/monitor.db').execute('SELECT max(lastCheck) FROM estado_conectores').fetchone()[0])"
+```
+
+Si esa hora se mueve al ritmo esperado, el escaneo esta bien y el problema es el envio:
+
+```bash
+docker logs iberdrola-monitor 2>&1 | grep 'Error al enviar'
+```
+
+El caso tipico es el Markdown de Telegram. Un guion bajo suelto abre una cursiva que
+nunca se cierra y Telegram rechaza el mensaje entero con `can't find end of the entity`.
+Por eso los estados, que llevan guion bajo (`EV_CONNECTED`, `OUT_OF_SERVICE`), van
+siempre entre acentos graves. Si aun asi falla, el aviso se reintenta sin formato, y si
+tampoco sale el estado nuevo no se graba, de modo que el cambio se vuelve a detectar en
+el siguiente escaneo en vez de perderse.
 
 ### Error en reserva/pago
 - Verifica que tienes una tarjeta guardada en la app Iberdrola
