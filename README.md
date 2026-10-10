@@ -33,6 +33,17 @@ Bot de Telegram para monitorizar, **reservar** y gestionar cargadores eléctrico
 - 🛑 **Se detiene automáticamente** cuando empiezas a cargar o cancelas
 - ⏰ Mantén tu reserva indefinidamente hasta llegar al cargador
 
+### 🎯 Caza de Cargador Libre
+* Si están todos ocupados, el bot **escanea a un intervalo que eliges** (30 s a 5 min) y **reserva el primer conector que quede libre**
+* Te avisa al detectarlo (para que apruebes el 3DS) y otra vez cuando queda **reservado**, con la auto-renovación ya activa
+* **Pausar, reanudar, cambiar intervalo o cancelar** desde botones
+* Se ofrece desde 📅 Reservar cuando no hay ninguno libre, o en cualquier momento con 🎯 Cazar Libre
+
+### 📜 Histórico de Reservas Ajenas
+* Cada cambio de estado de cada conector queda anotado con su hora
+* En los conectores `RESERVED` se muestra **desde cuándo están reservados** y a qué hora se cumplen los **13 min** (quien renueva suele cancelar ahí) y los **30 min** (caduca la reserva)
+* 📜 Histórico lista las últimas reservas vistas, cuánto duraron, si alguien llegó a cargar, y la duración media
+
 ## 🚀 Guía de Configuración Rápida
 
 ### 1. Clonar el repositorio
@@ -265,6 +276,10 @@ REMOTE_USER=pi REMOTE_HOST=192.168.1.50 ./deploy.sh
 | `IMAP_PASS` | App Password de Gmail | ❌ |
 | `IBERDROLA_APP_VERSION` | Versión de la app a emular (modificable desde el bot) | ❌ (4.36.8) |
 | `REDSYS_ANDROID_LICENSE` | Licencia para pagos Redsys | ❌ |
+| `HUNT_INTERVAL` | Intervalo inicial de la caza en segundos (modificable desde el bot) | ❌ (60) |
+| `HUNT_MIN_INTERVAL` | Intervalo mínimo de la caza, para no saturar la API | ❌ (30) |
+| `HUNT_MAX_MINUTES` | La caza se apaga sola pasados estos minutos | ❌ (180) |
+| `RESERVATION_MARKS_MIN` | Minutos de una reserva ajena que se señalan | ❌ (13,30) |
 
 ## 📱 Comandos del Bot
 
@@ -274,6 +289,8 @@ REMOTE_USER=pi REMOTE_HOST=192.168.1.50 ./deploy.sh
 | 🔄 Forzar Chequeo | Forzar escaneo inmediato |
 | 📅 Reservar | Reservar cargador de favoritos |
 | 📋 Mi Reserva | Ver/cancelar reserva activa |
+| 🎯 Cazar Libre | Reservar automáticamente en cuanto quede un conector libre |
+| 📜 Histórico | Reservas ajenas vistas, su duración y cómo acabaron |
 | ⏸️ Pausar/Reanudar | Pausar o reanudar escaneo automático |
 | ⏱️ Cambiar Intervalo | Cambiar intervalo de escaneo |
 | ⭐ Favoritos | Ver cargadores favoritos con dirección y alias |
@@ -304,6 +321,25 @@ Tras reservar, el bot mantiene tu reserva activa indefinidamente:
 - ⚠️ El socket deja de estar disponible
 
 Para cancelar: **📋 Mi Reserva → Cancelar Reserva**
+
+### Caza de cargador libre
+
+Si al pulsar 📅 Reservar no hay ninguno libre, el bot ofrece cazarlo. Eliges el intervalo y desde ese momento escanea hasta que un conector pasa a `AVAILABLE`. Entonces te avisa, paga (aprueba el 3DS) y reserva, priorizando `PREFERRED_CONNECTOR_TYPE`.
+
+Para no saturar la API:
+* cada vuelta es el mismo escaneo que el periódico, una sola petición pública, con los favoritos en caché 15 min,
+* si el escaneo periódico acaba de pasar, la caza reutiliza su resultado, y al revés, así que no se suman,
+* el intervalo no baja de `HUNT_MIN_INTERVAL` y lleva la misma variación aleatoria que el escaneo,
+* si la API falla, la espera se duplica en cada fallo hasta 10 min,
+* en pausa no se hace ninguna petición, y a los `HUNT_MAX_MINUTES` se apaga sola.
+
+Si el pago falla (3DS sin aprobar) o la reserva falla tras pagar, la caza se **pausa** en vez de reintentar, para no pedirte pagos en bucle. Sobrevive a un reinicio del contenedor.
+
+### Hora de las reservas ajenas
+
+La API no dice cuándo se hizo una reserva (el campo `updateDate` del estado llega vacío), así que el bot la estima con sus propios escaneos: la reserva se hizo entre el último escaneo en que el conector seguía en su estado anterior y el que la detectó. Se toma el extremo más temprano, de modo que el margen de error es como mucho un intervalo de escaneo. Si el bot estuvo parado entre medias, la hora sale con `≈`. Si ya estaba reservado al arrancar el bot por primera vez, la hora es desconocida.
+
+Cuidado: si alguien cancela y vuelve a reservar entre dos escaneos, el bot no lo ve, y las marcas siguen contando desde la primera reserva.
 
 ## 📊 Iconos de Estado
 

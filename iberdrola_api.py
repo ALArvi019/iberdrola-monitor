@@ -204,6 +204,9 @@ class IberdrolaAPI:
                         'maxPower': physical_socket.get('maxPower', 0),
                         'status': physical_socket.get('status', {}).get('statusCode', 'UNKNOWN'),
                         'statusUpdateDate': physical_socket.get('status', {}).get('updateDate'),
+                        'reservationInProgress': logical_socket.get('reservationInProgress'),
+                        # Bloque original, para poder volcarlo al log cuando haga falta
+                        'raw': physical_socket,
                         'price': physical_socket.get('appliedRate', {}).get('recharge', {}).get('finalPrice', 0)
                     }
                     conectores.append(conector)
