@@ -216,6 +216,7 @@ Reservas ajenas vistas, de la más reciente a la más antigua.
 ### `GET /api/cambios?limite=200&desde=2026-10-01T00:00:00`
 
 Cambios de estado en bruto, para gráficas (por ejemplo, a qué horas se libera un cargador).
+`limite` va de 1 a 5000 (200 por defecto). `desde` es opcional.
 
 ```json
 {
@@ -267,6 +268,12 @@ Tipos de `reserva`: `progreso`, `ok`, `error`, `renovada`, `renovacion_fallida`,
 
 `mensaje` es un texto en español listo para mostrar en una notificación. Los eventos `caza`
 y `reserva` pueden llevar `cuprId`, `physicalSocketId`, `cuprName` y `socketType`.
+
+Los eventos `cambio`, `caza` y `reserva` llevan `id:`. Al reconectar, el cliente manda el
+último que recibió en la cabecera `Last-Event-ID` y el servidor le reenvía primero los que
+se perdió (guarda los 200 últimos en memoria), y después el `estado`. `estado` y `pulso` no
+llevan id. Tras un reinicio del servidor se reenvían todos los que tenga, que serán pocos o
+ninguno.
 
 Si en 25 segundos no llega nada (ni siquiera `pulso`), la conexión está muerta y hay que
 reconectar.

@@ -268,13 +268,16 @@ class ServidorAPI:
         cola = self.monitor.suscribir()
         print(f"📡 Cliente de eventos conectado ({len(self.monitor._suscriptores)} en total)")
         try:
+            # Primero los avisos que se perdió durante el corte, luego el estado actual
+            for id_evento, evento, datos in self.monitor.eventos_desde(request.headers.get('Last-Event-ID')):
+                await self._enviar(respuesta, evento, datos, id_evento)
             await self._enviar(respuesta, 'estado', self.monitor.estado_dict())
             while True:
                 try:
-                    evento, datos = await asyncio.wait_for(cola.get(), timeout=PULSO_SEGUNDOS)
+                    id_evento, evento, datos = await asyncio.wait_for(cola.get(), timeout=PULSO_SEGUNDOS)
                 except asyncio.TimeoutError:
-                    evento, datos = 'pulso', {'ahora': self.monitor._iso(datetime.now())}
-                await self._enviar(respuesta, evento, datos)
+                    id_evento, evento, datos = None, 'pulso', {'ahora': self.monitor._iso(datetime.now())}
+                await self._enviar(respuesta, evento, datos, id_evento)
         except (ConnectionResetError, asyncio.CancelledError):
             pass
         finally:
@@ -283,6 +286,7 @@ class ServidorAPI:
         return respuesta
 
     @staticmethod
-    async def _enviar(respuesta, evento, datos):
+    async def _enviar(respuesta, evento, datos, id_evento=None):
         texto = json.dumps(datos, ensure_ascii=False)
-        await respuesta.write(f"event: {evento}\ndata: {texto}\n\n".encode())
+        cabecera = f"id: {id_evento}\n" if id_evento else ""
+        await respuesta.write(f"{cabecera}event: {evento}\ndata: {texto}\n\n".encode())

@@ -8,6 +8,7 @@ import os
 import random
 import signal
 import sqlite3
+from collections import deque
 from datetime import datetime, timedelta
 
 # Reap zombie child processes (Chromium headless_shell) automatically
@@ -90,6 +91,12 @@ class MonitorCargadores:
 
         # Clientes conectados a /api/eventos, una cola por cliente
         self._suscriptores = set()
+        # Avisos recientes (cambio, caza, reserva) para reenviarlos a quien reconecte
+        # con Last-Event-ID. El id lleva el arranque del proceso delante, para que tras
+        # un reinicio un id antiguo no se confunda con uno nuevo.
+        self._arranque_id = format(int(datetime.now().timestamp()), 'x')
+        self._contador_eventos = 0
+        self._eventos_recientes = deque(maxlen=200)
         self.reserva_en_curso = False  # Pago de una reserva pedida por la API
         
         # API de Iberdrola (sin auth inicialmente)
@@ -1710,15 +1717,39 @@ class MonitorCargadores:
         """Envía un evento a todos los clientes conectados.
 
         Un cliente que no lee pierde los eventos más viejos en vez de hacer crecer
-        la memoria: al reconectar recibe el estado completo igualmente.
+        la memoria: al reconectar recibe el estado completo y los avisos que se
+        perdió (eventos_desde). El estado no lleva id: siempre se manda entero.
         """
+        id_evento = None
+        if evento != 'estado':
+            self._contador_eventos += 1
+            id_evento = f"{self._arranque_id}.{self._contador_eventos}"
+            self._eventos_recientes.append((id_evento, evento, datos))
         for cola in list(self._suscriptores):
             if cola.full():
                 try:
                     cola.get_nowait()
                 except asyncio.QueueEmpty:
                     pass
-            cola.put_nowait((evento, datos))
+            cola.put_nowait((id_evento, evento, datos))
+
+    def eventos_desde(self, ultimo_id):
+        """Avisos posteriores a ultimo_id (el Last-Event-ID de un cliente).
+
+        Si el id es de un arranque anterior del proceso, todo lo que hay en memoria es
+        posterior. Si es de este arranque pero ya salió del buffer, se manda lo que
+        queda: es lo más que se puede recuperar.
+        """
+        if not ultimo_id:
+            return []
+        arranque, _, numero = ultimo_id.partition('.')
+        if arranque != self._arranque_id:
+            return list(self._eventos_recientes)
+        try:
+            numero = int(numero)
+        except ValueError:
+            return []
+        return [e for e in self._eventos_recientes if int(e[0].split('.')[1]) > numero]
 
     def publicar_estado(self):
         if self._suscriptores:
