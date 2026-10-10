@@ -2388,13 +2388,18 @@ class MonitorCargadores:
         print(f"⏰ Scheduler iniciado (cada {self.check_interval}s ±{amplitud:.0f}s)")
 
         # Loop infinito para chequeos periódicos
+        espera = self.proxima_espera()
+        self.next_scan_time = datetime.now() + timedelta(seconds=espera)
         while True:
+            await asyncio.sleep(max(0.0, (self.next_scan_time - datetime.now()).total_seconds()))
+            # La hora del siguiente se fija antes de escanear: el escaneo publica el
+            # estado, y si no saldría como próximo el escaneo que está en curso.
+            anterior = espera
             espera = self.proxima_espera()
             self.next_scan_time = datetime.now() + timedelta(seconds=espera)
-            await asyncio.sleep(espera)
             # Si la caza acaba de escanear, este escaneo sobra: los cambios ya se
             # han avisado desde allí.
-            if self.last_scan_at and (datetime.now() - self.last_scan_at).total_seconds() < espera * 0.8:
+            if self.last_scan_at and (datetime.now() - self.last_scan_at).total_seconds() < anterior * 0.8:
                 continue
             await self.chequear_cargadores()
     
