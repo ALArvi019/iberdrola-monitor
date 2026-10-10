@@ -1,0 +1,20 @@
+# Lo que nunca debe acabar dentro de la imagen: secretos, datos y la configuración
+# propia de cada instalación. El Dockerfile hace COPY . . y sin esto se copiaban.
+.env
+.env.*
+!.env.example
+data/
+mtls/
+docker-compose.override.yml
+*.p12
+*.key
+*.pem
+
+# Sin utilidad dentro de la imagen
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+*.log
+*.md
+deploy.sh

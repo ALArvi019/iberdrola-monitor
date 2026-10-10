@@ -87,6 +87,10 @@ class MonitorCargadores:
         self.hunt_next = None
         self.hunt_scans = 0
         self.hunt_failures = 0  # Intentos de reserva fallidos seguidos
+
+        # Clientes conectados a /api/eventos, una cola por cliente
+        self._suscriptores = set()
+        self.reserva_en_curso = False  # Pago de una reserva pedida por la API
         
         # API de Iberdrola (sin auth inicialmente)
         self.api = IberdrolaAPI(device_id=self.device_id)
@@ -786,6 +790,11 @@ class MonitorCargadores:
             if cambios:
                 mensaje = self.formatear_mensaje_cambio(cambios, conectores)
                 notificado = await self.enviar_mensaje(mensaje)
+                self.publicar('cambio', {'cambios': [
+                    {**self._datos_conector(c['conector']),
+                     'anterior': c['estado_anterior'], 'nuevo': c['estado_nuevo']}
+                    for c in cambios
+                ]})
 
             # Guardar nuevo estado. Si el aviso no ha salido, el estado nuevo NO se
             # graba: si se grabara, el siguiente ciclo ya no veria ninguna diferencia y
@@ -795,6 +804,7 @@ class MonitorCargadores:
             if not notificado:
                 print("⚠️  Cambio sin avisar, se reintenta en el proximo escaneo")
 
+            self.publicar_estado()
             return conectores
             
         except Exception as e:
@@ -1443,6 +1453,7 @@ class MonitorCargadores:
         if self.auto_renew_task:
             self.auto_renew_task.cancel()
         self.auto_renew_task = asyncio.create_task(self._auto_renew_loop())
+        self.publicar_estado()
 
     def _mensaje_reserva_ok(self, result, cupr_id: int, socket_id: int, cabecera: str):
         """Texto y botones de una reserva hecha, con la auto-renovación ya activa."""
@@ -1516,6 +1527,8 @@ class MonitorCargadores:
         result = self.api.cancel_reservation(cupr_id, socket_id, lat=self.latitude, lon=self.longitude)
         
         if result:
+            self.publicar('reserva', {'tipo': 'cancelada', 'mensaje': 'Reserva cancelada'})
+            self.publicar_estado()
             await query.edit_message_text("✅ *Reserva cancelada correctamente*\n\n🔄 Auto-renovación detenida.", parse_mode='Markdown')
         else:
             # Verificar si realmente se canceló
@@ -1565,7 +1578,8 @@ class MonitorCargadores:
                 self.auto_renew_active = False
                 await self._send_notification(
                     "🔌 *Carga iniciada*\n\n"
-                    "Auto-renovación detenida porque el vehículo está cargando."
+                    "Auto-renovación detenida porque el vehículo está cargando.",
+                    evento=('reserva', 'carga_iniciada')
                 )
                 break
             
@@ -1575,7 +1589,8 @@ class MonitorCargadores:
                 self.auto_renew_active = False
                 await self._send_notification(
                     "⚠️ *Reserva expirada*\n\n"
-                    "La reserva ya no está activa. Auto-renovación detenida."
+                    "La reserva ya no está activa. Auto-renovación detenida.",
+                    evento=('reserva', 'expirada')
                 )
                 break
             
@@ -1602,7 +1617,8 @@ class MonitorCargadores:
                 self.auto_renew_active = False
                 await self._send_notification(
                     "❌ *Socket no disponible*\n\n"
-                    "El cargador ya no está disponible. Auto-renovación detenida."
+                    "El cargador ya no está disponible. Auto-renovación detenida.",
+                    evento=('reserva', 'renovacion_fallida')
                 )
                 break
             
@@ -1627,18 +1643,24 @@ class MonitorCargadores:
                     f"Cargador {cupr_id}, Socket {socket_id}\n"
                     f"⏱️ Próxima renovación: *{next_renew_str}*\n\n"
                     "📱 Prepara tu app bancaria.",
-                    reply_markup=timer_buttons
+                    reply_markup=timer_buttons,
+                    evento=('reserva', 'renovada', {
+                        'cuprId': cupr_id, 'physicalSocketId': socket_id,
+                        'proxima_renovacion': self._iso(self.auto_renew_next_time),
+                    })
                 )
             else:
                 print("   ❌ Error al renovar reserva")
                 self.auto_renew_active = False
                 await self._send_notification(
                     "❌ *Error al renovar reserva*\n\n"
-                    "No se pudo renovar. Auto-renovación detenida."
+                    "No se pudo renovar. Auto-renovación detenida.",
+                    evento=('reserva', 'renovacion_fallida')
                 )
                 break
         
         print("🔄 Auto-renovación finalizada")
+        self.publicar_estado()
     
     async def _ejecutar_reserva_silenciosa(self, cupr_id: int, socket_id: int):
         """Ejecuta una reserva sin interacción de usuario (para renovaciones)"""
@@ -1647,11 +1669,18 @@ class MonitorCargadores:
             print(f"❌ Error en reserva silenciosa: {error}")
         return result is not None
     
-    async def _send_notification(self, message: str, reply_markup=None):
+    async def _send_notification(self, message: str, reply_markup=None, evento=None):
         """Envía una notificación al usuario. Devuelve True si llegó.
 
         Como enviar_mensaje, si el Markdown falla se reintenta en texto plano.
+        evento=(canal, tipo[, extra]) la publica además en /api/eventos, con el
+        mismo texto sin formato, y emite el estado actualizado.
         """
+        if evento:
+            canal, tipo = evento[0], evento[1]
+            extra = evento[2] if len(evento) > 2 else {}
+            self.publicar(canal, {'tipo': tipo, 'mensaje': self._texto_plano(message), **extra})
+            self.publicar_estado()
         markup = reply_markup or self.get_main_keyboard()
         for parse_mode in ('Markdown', None):
             try:
@@ -1665,6 +1694,291 @@ class MonitorCargadores:
             except Exception as e:
                 print(f"❌ Error enviando notificación ({parse_mode or 'texto plano'}): {e}")
         return False
+
+    # ==================== EVENTOS Y DATOS PARA LA API ====================
+
+    def suscribir(self):
+        """Cola de eventos para un cliente de /api/eventos."""
+        cola = asyncio.Queue(maxsize=100)
+        self._suscriptores.add(cola)
+        return cola
+
+    def desuscribir(self, cola):
+        self._suscriptores.discard(cola)
+
+    def publicar(self, evento, datos):
+        """Envía un evento a todos los clientes conectados.
+
+        Un cliente que no lee pierde los eventos más viejos en vez de hacer crecer
+        la memoria: al reconectar recibe el estado completo igualmente.
+        """
+        for cola in list(self._suscriptores):
+            if cola.full():
+                try:
+                    cola.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            cola.put_nowait((evento, datos))
+
+    def publicar_estado(self):
+        if self._suscriptores:
+            self.publicar('estado', self.estado_dict())
+
+    @staticmethod
+    def _iso(dt):
+        return dt.replace(microsecond=0).isoformat() if dt else None
+
+    @staticmethod
+    def _texto_plano(mensaje):
+        return mensaje.replace('*', '').replace('`', '').replace('_', ' ').strip()
+
+    @staticmethod
+    def _datos_conector(con):
+        return {
+            'cuprId': con.get('cuprId'),
+            'cuprName': con.get('cuprName'),
+            'physicalSocketId': con.get('physicalSocketId'),
+            'socketCode': str(con.get('socketCode', '')),
+            'socketType': con.get('socketType'),
+        }
+
+    def caza_dict(self):
+        if not self.hunt_task:
+            estado = 'inactiva'
+        else:
+            estado = 'pausada' if self.hunt_paused else 'activa'
+        return {
+            'estado': estado,
+            'intervalo': self.hunt_interval,
+            'intervalo_min': self.hunt_min_interval,
+            'opciones': [s for s in self.HUNT_INTERVAL_OPTIONS if s >= self.hunt_min_interval],
+            'escaneos': self.hunt_scans,
+            'proximo': self._iso(self.hunt_next) if self.hunt_task and not self.hunt_paused else None,
+            'hasta': self._iso(self.hunt_until) if self.hunt_task else None,
+            'fallos': self.hunt_failures,
+        }
+
+    def estado_dict(self):
+        conectores = self.last_conectores or []
+        reservas = self.reservas_en_curso(conectores)
+        ahora = datetime.now()
+        lista = []
+        for con in conectores:
+            item = {**self._datos_conector(con), 'maxPower': con.get('maxPower'), 'status': con.get('status')}
+            if con['physicalSocketId'] in reservas:
+                inicio, fiable = reservas[con['physicalSocketId']]
+                marcas = []
+                if inicio:
+                    for minutos in self.reservation_marks:
+                        hora = inicio + timedelta(minutes=minutos)
+                        marcas.append({'minutos': minutos, 'hora': self._iso(hora), 'cumplida': ahora >= hora})
+                item['reserva'] = {'inicio': self._iso(inicio), 'fiable': fiable, 'marcas': marcas}
+            lista.append(item)
+
+        return {
+            'ahora': self._iso(ahora),
+            'escaneo': {
+                'pausado': self.scanning_paused,
+                'intervalo': self.check_interval,
+                'jitter': round(self.jitter_amplitude(), 1),
+                'ultimo': self._iso(self.last_scan_at),
+                'proximo': None if self.scanning_paused else self._iso(self.next_scan_time),
+            },
+            'conectores': lista,
+            'caza': self.caza_dict(),
+            'mi_reserva': {
+                'auto_renovacion': self.auto_renew_active,
+                'cuprId': self.auto_renew_cupr_id if self.auto_renew_active else None,
+                'physicalSocketId': self.auto_renew_socket_id if self.auto_renew_active else None,
+                'proxima_renovacion': self._iso(self.auto_renew_next_time) if self.auto_renew_active else None,
+                'en_curso': self.reserva_en_curso,
+            },
+        }
+
+    def historial_dict(self, limite=20):
+        reservas = self.historial_reservas(limite=limite)
+        lista = [{
+            'physicalSocketId': r['socket_id'],
+            'cuprName': r['cuprName'],
+            'socketCode': r['socketCode'],
+            'socketType': r['socketType'],
+            'inicio': self._iso(r['inicio']),
+            'fiable': r['fiable'],
+            'fin': self._iso(r['fin']),
+            'fin_estado': r['fin_estado'],
+            'minutos': r['minutos'],
+        } for r in reservas]
+        cerradas = [r for r in reservas if r['minutos'] is not None]
+        return {
+            'reservas': lista,
+            'resumen': {
+                'total': len(cerradas),
+                'media_minutos': round(sum(r['minutos'] for r in cerradas) / len(cerradas), 1) if cerradas else None,
+                'usadas': sum(1 for r in cerradas if r['fin_estado'] in ('OCCUPIED', 'EV_CONNECTED')),
+                'liberadas': sum(1 for r in cerradas if r['fin_estado'] == 'AVAILABLE'),
+            },
+        }
+
+    def cambios_list(self, limite=200, desde=None):
+        """Cambios de estado reales (sin las filas de partida), del más nuevo al más viejo."""
+        consulta = (
+            'SELECT physicalSocketId, cuprName, socketCode, socketType, '
+            'estado_anterior, estado_nuevo, detectado '
+            'FROM historial_estados WHERE estado_anterior IS NOT NULL'
+        )
+        params = []
+        if desde:
+            consulta += ' AND detectado >= ?'
+            params.append(desde.isoformat())
+        consulta += ' ORDER BY id DESC LIMIT ?'
+        params.append(limite)
+        conn = sqlite3.connect(self.db_path)
+        filas = conn.execute(consulta, params).fetchall()
+        conn.close()
+        return [{
+            'physicalSocketId': f[0], 'cuprName': f[1], 'socketCode': f[2], 'socketType': f[3],
+            'anterior': f[4], 'nuevo': f[5], 'detectado': self._iso(self._parse_fecha(f[6])),
+        } for f in filas]
+
+    def ajustes_dict(self):
+        return {
+            'intervalo_escaneo': self.check_interval,
+            'escaneo_pausado': self.scanning_paused,
+            'marcas_reserva': self.reservation_marks,
+            'renovacion_minutos': self.RENEW_INTERVAL_MINUTES,
+        }
+
+    def cambiar_intervalo_escaneo(self, segundos):
+        self.check_interval = segundos
+        self.set_config('check_interval', segundos)
+        self.publicar_estado()
+
+    def cambiar_pausa_escaneo(self, pausado):
+        self.scanning_paused = pausado
+        self.publicar_estado()
+
+    def reanudar_caza(self):
+        self.hunt_paused = False
+        self.hunt_failures = 0
+        self._guardar_estado_caza()
+        self.publicar('caza', {'tipo': 'reanudada', 'mensaje': 'Caza reanudada'})
+        self.publicar_estado()
+
+    def cambiar_intervalo_caza(self, segundos):
+        self.hunt_interval = max(self.hunt_min_interval, segundos)
+        self.set_config('hunt_interval', self.hunt_interval)
+        self.publicar_estado()
+
+    async def hay_reserva_activa(self):
+        """Pregunta a Iberdrola si hay reserva propia. None si no hay sesión."""
+        authenticated, _ = await self.ensure_authenticated()
+        if not authenticated:
+            return None
+        transaction = await asyncio.to_thread(
+            self.api.get_transaction_in_progress, lat=self.latitude, lon=self.longitude
+        )
+        return bool(transaction and transaction.get('reservationInProgress'))
+
+    async def empezar_caza_api(self, intervalo=None):
+        self.hunt_interval = max(self.hunt_min_interval, intervalo or self.hunt_interval)
+        self.set_config('hunt_interval', self.hunt_interval)
+        self._arrancar_caza(datetime.now() + timedelta(minutes=self.hunt_max_minutes), pausada=False)
+        texto = f"Caza iniciada desde la app, cada {self._formatear_segundos(self.hunt_interval)}"
+        self.publicar('caza', {'tipo': 'iniciada', 'mensaje': texto})
+        await self.enviar_mensaje(f"🎯 {texto}")
+
+    async def pausar_caza_api(self):
+        await self._pausar_caza("app")
+        self.publicar('caza', {'tipo': 'pausada', 'mensaje': 'Caza pausada'})
+
+    async def cancelar_caza_api(self):
+        await self._parar_caza("app")
+        self.publicar('caza', {'tipo': 'cancelada', 'mensaje': 'Caza cancelada'})
+
+    async def reserva_detalle(self):
+        """Reserva propia según Iberdrola, ya en el formato de la API."""
+        reservation = await asyncio.to_thread(
+            self.api.get_user_reservation, lat=self.latitude, lon=self.longitude
+        )
+        if not reservation or not reservation.get('reservationId'):
+            return {'activa': False}
+        return {
+            'activa': True,
+            'nombre': reservation.get('chargePointInfo', {}).get('foldedTitle'),
+            'cuprId': reservation.get('cuprId') or self.auto_renew_cupr_id,
+            'physicalSocketId': reservation.get('physicalSocketId'),
+            'socketType': reservation.get('socketType', {}).get('socketName'),
+            'inicio': self._iso(self._parse_fecha(reservation.get('startDate'))),
+            'fin': self._iso(self._parse_fecha(reservation.get('endDate'))),
+            'precio': reservation.get('reserve', {}).get('finalPrice'),
+            'coste_cancelacion': reservation.get('cancelationCost'),
+            'estado': reservation.get('status', {}).get('description'),
+            'auto_renovacion': self.auto_renew_active,
+            'proxima_renovacion': self._iso(self.auto_renew_next_time) if self.auto_renew_active else None,
+        }
+
+    async def reservar_api(self, cupr_id, socket_id):
+        """Reserva pedida desde la app. Corre en segundo plano y avisa por eventos."""
+        self.reserva_en_curso = True
+        self.publicar_estado()
+        datos = {'cuprId': cupr_id, 'physicalSocketId': socket_id}
+        for con in self.last_conectores or []:
+            if con.get('physicalSocketId') == socket_id:
+                datos = self._datos_conector(con)
+
+        async def progreso(texto):
+            self.publicar('reserva', {'tipo': 'progreso', 'mensaje': self._texto_plano(texto), **datos})
+
+        try:
+            await progreso("⏳ Procesando reserva...")
+            result, error, _ = await self._proceso_reserva(cupr_id, socket_id, progreso=progreso)
+        finally:
+            self.reserva_en_curso = False
+
+        if not result:
+            await self._send_notification(
+                f"❌ *No se pudo reservar desde la app*\n\n{error}",
+                evento=('reserva', 'error', datos)
+            )
+            return
+
+        if self.hunt_task:
+            await self._parar_caza("reserva desde la app")
+        self._iniciar_auto_renovacion(cupr_id, socket_id)
+        mensaje, buttons = self._mensaje_reserva_ok(
+            result, cupr_id, socket_id, "🎉 *¡RESERVA EXITOSA!* (desde la app)"
+        )
+        await self._send_notification(mensaje, reply_markup=buttons, evento=('reserva', 'ok', datos))
+
+    def parar_auto_renovacion(self):
+        self.auto_renew_active = False
+        if self.auto_renew_task:
+            self.auto_renew_task.cancel()
+            self.auto_renew_task = None
+        self.publicar_estado()
+
+    async def cancelar_reserva_api(self):
+        """Cancela la reserva propia. Devuelve True si ya no queda reserva."""
+        self.parar_auto_renovacion()
+        transaction = await asyncio.to_thread(
+            self.api.get_transaction_in_progress, lat=self.latitude, lon=self.longitude
+        )
+        if not transaction or not transaction.get('reservationInProgress'):
+            return True
+        await asyncio.to_thread(
+            self.api.cancel_reservation, transaction.get('cuprId'), transaction.get('physicalSocketId'),
+            lat=self.latitude, lon=self.longitude
+        )
+        transaction = await asyncio.to_thread(
+            self.api.get_transaction_in_progress, lat=self.latitude, lon=self.longitude
+        )
+        cancelada = not (transaction and transaction.get('reservationInProgress'))
+        if cancelada:
+            await self._send_notification(
+                "✅ *Reserva cancelada desde la app*\n\n🔄 Auto-renovación detenida.",
+                evento=('reserva', 'cancelada')
+            )
+        return cancelada
 
     # ==================== CAZA DE CARGADOR LIBRE ====================
     #
@@ -1796,6 +2110,7 @@ class MonitorCargadores:
         self.hunt_next = None
         self.hunt_task = asyncio.create_task(self._bucle_caza())
         self._guardar_estado_caza()
+        self.publicar_estado()
         print(f"🎯 Caza iniciada (cada {self.hunt_interval}s, hasta {hasta.strftime('%H:%M')})")
 
     async def _parar_caza(self, motivo):
@@ -1809,6 +2124,7 @@ class MonitorCargadores:
         if task and task is not asyncio.current_task():
             task.cancel()
         print(f"🎯 Caza detenida: {motivo}")
+        self.publicar_estado()
 
     async def _pausar_caza(self, motivo=None):
         self.hunt_paused = True
@@ -1816,6 +2132,7 @@ class MonitorCargadores:
         self._guardar_estado_caza()
         if motivo:
             print(f"🎯 Caza pausada: {motivo}")
+        self.publicar_estado()
 
     async def _bucle_caza(self):
         espera_error = None
@@ -1826,7 +2143,8 @@ class MonitorCargadores:
                     await self._send_notification(
                         "⌛ *Caza terminada*\n\n"
                         f"Han pasado {self.hunt_max_minutes} min sin encontrar un conector libre. "
-                        "Vuelve a activarla con 🎯 Cazar Libre si sigues necesitándolo."
+                        "Vuelve a activarla con 🎯 Cazar Libre si sigues necesitándolo.",
+                        evento=('caza', 'terminada')
                     )
                     return
 
@@ -1860,7 +2178,9 @@ class MonitorCargadores:
         except Exception as e:
             print(f"❌ Error en la caza: {e}")
             await self._parar_caza(f"error: {e}")
-            await self._send_notification(f"❌ *Caza detenida por un error*\n\n{str(e)[:200]}")
+            await self._send_notification(
+                f"❌ *Caza detenida por un error*\n\n{str(e)[:200]}", evento=('caza', 'fallo')
+            )
 
     async def _escaneo_caza(self):
         """Estado de los conectores para una vuelta de la caza.
@@ -1900,13 +2220,15 @@ class MonitorCargadores:
         if transaction and transaction.get('reservationInProgress'):
             await self._parar_caza("ya hay una reserva")
             await self._send_notification(
-                "ℹ️ *Caza detenida*\n\nYa tienes una reserva activa. Usa 📋 Mi Reserva para verla."
+                "ℹ️ *Caza detenida*\n\nYa tienes una reserva activa. Usa 📋 Mi Reserva para verla.",
+                evento=('caza', 'cancelada')
             )
             return True
 
         await self._send_notification(
             f"🎯 *¡Conector libre!*\n\n📍 {nombre}\n🔌 Socket {con.get('socketCode', socket_id)} "
-            f"({con.get('socketType', '')})\n\n⏳ Reservando...\n📱 Aprueba el pago en tu app bancaria."
+            f"({con.get('socketType', '')})\n\n⏳ Reservando...\n📱 Aprueba el pago en tu app bancaria.",
+            evento=('caza', 'libre', self._datos_conector(con))
         )
 
         result, error, fase = await self._proceso_reserva(cupr_id, socket_id)
@@ -1917,7 +2239,9 @@ class MonitorCargadores:
             mensaje, buttons = self._mensaje_reserva_ok(
                 result, cupr_id, socket_id, "🎯🎉 *¡CAZADO! Cargador RESERVADO*"
             )
-            await self._send_notification(mensaje, reply_markup=buttons)
+            await self._send_notification(
+                mensaje, reply_markup=buttons, evento=('caza', 'reservado', self._datos_conector(con))
+            )
             return True
 
         self.hunt_failures += 1
@@ -1928,10 +2252,14 @@ class MonitorCargadores:
             await self._send_notification(
                 f"⚠️ *No se pudo reservar*\n\n{error}\n\n"
                 "Caza *pausada* para no repetir el pago. Reanúdala o cancélala:",
-                reply_markup=self._botones_control_caza()
+                reply_markup=self._botones_control_caza(),
+                evento=('caza', 'fallo', self._datos_conector(con))
             )
         else:
-            await self._send_notification(f"⚠️ No se pudo reservar: {error}\n\nSigo buscando.")
+            await self._send_notification(
+                f"⚠️ No se pudo reservar: {error}\n\nSigo buscando.",
+                evento=('caza', 'fallo', self._datos_conector(con))
+            )
         return False
 
     async def _callback_caza(self, query):
@@ -1958,9 +2286,7 @@ class MonitorCargadores:
         if data == 'hunt_pause':
             await self._pausar_caza("usuario")
         elif data == 'hunt_resume':
-            self.hunt_paused = False
-            self.hunt_failures = 0
-            self._guardar_estado_caza()
+            self.reanudar_caza()
         elif data == 'hunt_stop':
             await self._parar_caza("usuario")
             await query.edit_message_text("🛑 *Caza cancelada*", parse_mode='Markdown')
@@ -1991,7 +2317,8 @@ class MonitorCargadores:
         self._arrancar_caza(hasta, pausada=(estado == 'paused'))
         await self._send_notification(
             "🎯 *Caza retomada tras el reinicio*\n\n" + self._mensaje_estado_caza(),
-            reply_markup=self._botones_control_caza()
+            reply_markup=self._botones_control_caza(),
+            evento=('caza', 'retomada')
         )
 
     def _jitter(self, intervalo):
@@ -2040,6 +2367,20 @@ class MonitorCargadores:
                 continue
             await self.chequear_cargadores()
     
+    async def _iniciar_api(self):
+        """Arranca la API HTTP si hay API_TOKEN. Ver API.md."""
+        token = os.getenv('API_TOKEN', '').strip()
+        if not token:
+            print("ℹ️ API HTTP desactivada (sin API_TOKEN)")
+            return
+        if len(token) < 32:
+            # Un token corto se adivina. La API puede pagar reservas, no se arranca.
+            print("❌ API_TOKEN demasiado corto (mínimo 32 caracteres). API HTTP desactivada")
+            return
+        from api_server import ServidorAPI
+        self.api_server = ServidorAPI(self, token, puerto=int(os.getenv('API_PORT', '8090')))
+        await self.api_server.iniciar()
+
     async def run(self):
         """Inicia el bot"""
         # Cargar configuración guardada
@@ -2076,6 +2417,7 @@ class MonitorCargadores:
         # Iniciar scheduler como tarea asíncrona
         asyncio.create_task(self.run_schedule_loop())
         await self._retomar_caza()
+        await self._iniciar_api()
         
         # Iniciar bot
         print("🤖 Bot de Telegram iniciado")

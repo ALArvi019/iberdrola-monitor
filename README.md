@@ -44,6 +44,12 @@ Bot de Telegram para monitorizar, **reservar** y gestionar cargadores eléctrico
 * En los conectores `RESERVED` se muestra **desde cuándo están reservados** y a qué hora se cumplen los **13 min** (quien renueva suele cancelar ahí) y los **30 min** (caduca la reserva)
 * 📜 Histórico lista las últimas reservas vistas, cuánto duraron, si alguien llegó a cargar, y la duración media
 
+### 🌐 API HTTP para una app propia
+* API REST más eventos en directo (SSE) con el mismo estado que el bot: escaneo, caza, reserva e histórico
+* Desactivada salvo que se defina `API_TOKEN`
+* Pensada para publicarse detrás de un proxy inverso con TLS y certificado de cliente (mTLS)
+* Contrato completo y ejemplo de proxy en [API.md](API.md)
+
 ## 🚀 Guía de Configuración Rápida
 
 ### 1. Clonar el repositorio
@@ -280,6 +286,8 @@ REMOTE_USER=pi REMOTE_HOST=192.168.1.50 ./deploy.sh
 | `HUNT_MIN_INTERVAL` | Intervalo mínimo de la caza, para no saturar la API | ❌ (30) |
 | `HUNT_MAX_MINUTES` | La caza se apaga sola pasados estos minutos | ❌ (180) |
 | `RESERVATION_MARKS_MIN` | Minutos de una reserva ajena que se señalan | ❌ (13,30) |
+| `API_TOKEN` | Activa la API HTTP. Mínimo 32 caracteres, ver [API.md](API.md) | ❌ |
+| `API_PORT` | Puerto de la API dentro del contenedor | ❌ (8090) |
 
 ## 📱 Comandos del Bot
 

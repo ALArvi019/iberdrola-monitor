@@ -50,3 +50,11 @@ Thumbs.db
 
 # Backups
 *.backup
+
+# Propio de cada instalación (ver API.md)
+docker-compose.override.yml
+.env.*
+!.env.example
+mtls/
+*.p12
+*.key
