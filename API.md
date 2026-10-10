@@ -34,6 +34,7 @@ Siempre JSON con un código estable:
 | `no_encontrado` | 404 | Ruta desconocida |
 | `reserva_activa` | 409 | Ya hay una reserva, no se puede cazar ni reservar |
 | `reserva_en_curso` | 409 | Ya se está procesando una reserva (pago 3DS pendiente) |
+| `cancelacion_en_curso` | 409 | Ya se está cancelando la reserva |
 | `caza_inactiva` | 409 | Se pide pausar, reanudar o cambiar una caza que no existe |
 | `sin_sesion` | 503 | No hay sesión de Iberdrola (falta usuario o el login falló) |
 | `error_iberdrola` | 502 | La API de Iberdrola no respondió |
@@ -183,7 +184,15 @@ la renovación automática y se cancela cualquier caza.
 
 ### `DELETE /api/reserva`
 
-Cancela la reserva propia y para la renovación automática. `{"ok": true}`.
+Cancela la reserva propia y para la renovación automática.
+
+La respuesta de Iberdrola al cancelar no es fiable (a veces da error y cancela igual, y tarda
+unos segundos en reflejarse), así que el servidor confirma consultando si la reserva sigue
+y, si sigue, vuelve a cancelar, hasta 3 veces. Como eso puede llevar casi un minuto, la
+respuesta es inmediata (`202 {"aceptada": true}`) y el resultado llega por `/api/eventos`
+como un evento `reserva` de tipo `cancelada` o `error`.
+
+`409 cancelacion_en_curso` si ya se está cancelando.
 
 ### `DELETE /api/reserva/renovacion`
 

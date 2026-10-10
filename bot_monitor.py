@@ -98,6 +98,7 @@ class MonitorCargadores:
         self._contador_eventos = 0
         self._eventos_recientes = deque(maxlen=200)
         self.reserva_en_curso = False  # Pago de una reserva pedida por la API
+        self.cancelacion_en_curso = False
         
         # API de Iberdrola (sin auth inicialmente)
         self.api = IberdrolaAPI(device_id=self.device_id)
@@ -1530,22 +1531,20 @@ class MonitorCargadores:
         
         cupr_id = transaction.get('cuprId')
         socket_id = transaction.get('physicalSocketId')
-        
-        # Cancelar
-        result = self.api.cancel_reservation(cupr_id, socket_id, lat=self.latitude, lon=self.longitude)
-        
-        if result:
+
+        # Cancelar y confirmar con Iberdrola (su respuesta no es fiable, ver _cancelar_y_confirmar)
+        cancelada = await self._cancelar_y_confirmar(cupr_id, socket_id)
+        asyncio.create_task(self.reescanear_tras_accion())
+
+        if cancelada:
             self.publicar('reserva', {'tipo': 'cancelada', 'mensaje': 'Reserva cancelada'})
             self.publicar_estado()
             await query.edit_message_text("✅ *Reserva cancelada correctamente*\n\n🔄 Auto-renovación detenida.", parse_mode='Markdown')
-            asyncio.create_task(self.reescanear_tras_accion())
         else:
-            # Verificar si realmente se canceló
-            transaction2 = self.api.get_transaction_in_progress(lat=self.latitude, lon=self.longitude)
-            if not transaction2.get('reservationInProgress'):
-                await query.edit_message_text("✅ *Reserva cancelada correctamente*\n\n🔄 Auto-renovación detenida.", parse_mode='Markdown')
-            else:
-                await query.edit_message_text("❌ Error al cancelar la reserva. Inténtalo de nuevo.")
+            await query.edit_message_text(
+                "❌ Iberdrola sigue mostrando la reserva tras 3 intentos de cancelarla. "
+                "La auto-renovación está parada, así que caducará sola."
+            )
     
     async def _stop_auto_renew(self, query):
         """Detiene la auto-renovación sin cancelar la reserva activa"""
@@ -1568,18 +1567,33 @@ class MonitorCargadores:
         """Loop de auto-renovación de reservas"""
         print(f"🔄 Auto-renovación iniciada (cada {self.RENEW_INTERVAL_MINUTES} minutos)")
         
+        reintento = None  # Segundos hasta reintentar si Iberdrola no respondió
         while self.auto_renew_active:
             # Esperar el intervalo de renovación. El jitter aquí solo resta
             # tiempo: adelantarse es seguro, pasarse de los 15 min gratis no.
-            await asyncio.sleep(self.RENEW_INTERVAL_MINUTES * 60 - self._rand.uniform(0, 30))
+            await asyncio.sleep(reintento or (self.RENEW_INTERVAL_MINUTES * 60 - self._rand.uniform(0, 30)))
+            reintento = None
             
             if not self.auto_renew_active:
                 break
             
             print(f"🔄 Iniciando renovación automática...")
             
-            # Verificar si aún hay reserva activa (podría haber empezado a cargar)
-            transaction = self.api.get_transaction_in_progress(lat=self.latitude, lon=self.longitude)
+            # Verificar si aún hay reserva activa (podría haber empezado a cargar). Una
+            # consulta fallida (None) no significa que la reserva haya caducado: se
+            # reintenta antes de concluir nada, o un fallo puntual pararía la renovación.
+            transaction = None
+            for _ in range(3):
+                transaction = await asyncio.to_thread(
+                    self.api.get_transaction_in_progress, lat=self.latitude, lon=self.longitude
+                )
+                if transaction is not None:
+                    break
+                await asyncio.sleep(5)
+            if transaction is None:
+                print("⚠️ Iberdrola no responde. Se reintenta la renovación en 30 s.")
+                reintento = 30
+                continue
             
             if transaction and transaction.get('chargeInProgress'):
                 # Ya está cargando, detener auto-renovación
@@ -1608,18 +1622,30 @@ class MonitorCargadores:
             socket_id = self.auto_renew_socket_id
             
             print(f"   Cancelando reserva actual (cupr:{cupr_id}, socket:{socket_id})...")
-            self.api.cancel_reservation(cupr_id, socket_id, lat=self.latitude, lon=self.longitude)
-            
-            # Esperar un momento para que se procese
-            await asyncio.sleep(2)
-            
-            # Verificar que el socket sigue disponible
-            conectores = self.api.obtener_estado_conectores([cupr_id], lat=self.latitude, lon=self.longitude)
+            # Solo 2 intentos: cada uno puede llevar 15 s y hay que volver a reservar antes
+            # de que el hueco lo coja otro.
+            if not await self._cancelar_y_confirmar(cupr_id, socket_id, intentos=2):
+                print("❌ No se pudo confirmar la cancelación. La reserva sigue, sin renovar.")
+                self.auto_renew_active = False
+                await self._send_notification(
+                    "⚠️ *No se pudo renovar*\n\n"
+                    "Iberdrola no confirmó la cancelación de la reserva actual, así que sigue activa "
+                    "pero ya no se renovará. Caducará a los 30 minutos de hacerla.",
+                    evento=('reserva', 'renovacion_fallida')
+                )
+                break
+
+            # El estado del conector también va con retraso: se mira hasta tres veces
             socket_available = False
-            for c in conectores or []:
-                if c.get('physicalSocketId') == socket_id and c.get('status') == 'AVAILABLE':
+            for _ in range(3):
+                conectores = await asyncio.to_thread(
+                    self.api.obtener_estado_conectores, [cupr_id], self.latitude, self.longitude
+                )
+                if any(c.get('physicalSocketId') == socket_id and c.get('status') == 'AVAILABLE'
+                       for c in conectores or []):
                     socket_available = True
                     break
+                await asyncio.sleep(3)
             
             if not socket_available:
                 print("❌ Socket ya no disponible. Deteniendo auto-renovación.")
@@ -2007,10 +2033,37 @@ class MonitorCargadores:
 
         El estado de los conectores solo cambia al escanear. Sin esto, tras una reserva
         el cargador seguía saliendo libre hasta el siguiente escaneo, y nunca si el
-        escaneo automático estaba en pausa. Es una sola petición por acción.
+        escaneo automático estaba en pausa.
+
+        Se mira dos veces porque el estado del cargador en Iberdrola va con retraso
+        respecto a la reserva: a los pocos segundos puede seguir saliendo el anterior.
         """
-        await asyncio.sleep(2)  # Margen para que Iberdrola refleje el cambio
-        await self.chequear_cargadores(forzar=True)
+        for espera in (3, 17):
+            await asyncio.sleep(espera)
+            await self.chequear_cargadores(forzar=True)
+
+    async def _cancelar_y_confirmar(self, cupr_id, socket_id, intentos=3):
+        """Cancela una reserva propia y no da nada por hecho hasta confirmarlo.
+
+        La respuesta de cancelReservation no es fiable: a veces devuelve un 500 y cancela
+        igualmente, y a veces tarda unos segundos en reflejarse. Así que se ignora y se
+        pregunta a Iberdrola si la reserva sigue ahí, varias veces. Si sigue, se vuelve a
+        cancelar. Devuelve True solo cuando Iberdrola confirma que ya no hay reserva.
+        """
+        for intento in range(1, intentos + 1):
+            await asyncio.to_thread(
+                self.api.cancel_reservation, cupr_id, socket_id, lat=self.latitude, lon=self.longitude
+            )
+            for _ in range(5):
+                await asyncio.sleep(3)
+                transaction = await asyncio.to_thread(
+                    self.api.get_transaction_in_progress, lat=self.latitude, lon=self.longitude
+                )
+                # None es que la consulta falló: eso no confirma nada, se sigue mirando
+                if transaction is not None and not transaction.get('reservationInProgress'):
+                    return True
+            print(f"⚠️ La reserva sigue activa tras el intento {intento} de cancelarla")
+        return False
 
     def parar_auto_renovacion(self):
         self.auto_renew_active = False
@@ -2020,28 +2073,41 @@ class MonitorCargadores:
         self.publicar_estado()
 
     async def cancelar_reserva_api(self):
-        """Cancela la reserva propia. Devuelve True si ya no queda reserva."""
-        self.parar_auto_renovacion()
-        transaction = await asyncio.to_thread(
-            self.api.get_transaction_in_progress, lat=self.latitude, lon=self.longitude
-        )
-        if not transaction or not transaction.get('reservationInProgress'):
-            return True
-        await asyncio.to_thread(
-            self.api.cancel_reservation, transaction.get('cuprId'), transaction.get('physicalSocketId'),
-            lat=self.latitude, lon=self.longitude
-        )
-        transaction = await asyncio.to_thread(
-            self.api.get_transaction_in_progress, lat=self.latitude, lon=self.longitude
-        )
-        cancelada = not (transaction and transaction.get('reservationInProgress'))
-        asyncio.create_task(self.reescanear_tras_accion())
-        if cancelada:
-            await self._send_notification(
-                "✅ *Reserva cancelada desde la app*\n\n🔄 Auto-renovación detenida.",
-                evento=('reserva', 'cancelada')
+        """Cancelación pedida desde la app. Corre en segundo plano y avisa por eventos:
+        con la confirmación y los reintentos puede tardar más de lo que espera una
+        petición HTTP."""
+        self.cancelacion_en_curso = True
+        try:
+            self.parar_auto_renovacion()
+            transaction = await asyncio.to_thread(
+                self.api.get_transaction_in_progress, lat=self.latitude, lon=self.longitude
             )
-        return cancelada
+            if transaction is not None and not transaction.get('reservationInProgress'):
+                self.publicar('reserva', {'tipo': 'cancelada', 'mensaje': 'No había ninguna reserva activa'})
+                return
+            if transaction is None:
+                await self._send_notification(
+                    "❌ *No se pudo cancelar desde la app*\n\nIberdrola no responde. Inténtalo de nuevo.",
+                    evento=('reserva', 'error')
+                )
+                return
+
+            fin = self._parse_fecha(transaction.get('reservationEndDate'))
+            if await self._cancelar_y_confirmar(transaction.get('cuprId'), transaction.get('physicalSocketId')):
+                await self._send_notification(
+                    "✅ *Reserva cancelada desde la app*\n\n🔄 Auto-renovación detenida.",
+                    evento=('reserva', 'cancelada')
+                )
+            else:
+                caduca = f" Caducará sola a las {fin.strftime('%H:%M')}." if fin else ""
+                await self._send_notification(
+                    "❌ *No se pudo confirmar la cancelación*\n\n"
+                    f"Iberdrola sigue mostrando la reserva tras 3 intentos. La renovación automática está parada.{caduca}",
+                    evento=('reserva', 'error')
+                )
+        finally:
+            self.cancelacion_en_curso = False
+            asyncio.create_task(self.reescanear_tras_accion())
 
     # ==================== CAZA DE CARGADOR LIBRE ====================
     #

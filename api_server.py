@@ -213,9 +213,13 @@ class ServidorAPI:
         authenticated, _ = await self.monitor.ensure_authenticated()
         if not authenticated:
             return _error(503, 'sin_sesion', 'No hay sesión de Iberdrola')
-        if not await self.monitor.cancelar_reserva_api():
-            return _error(502, 'error_iberdrola', 'Iberdrola no confirmó la cancelación')
-        return web.json_response({'ok': True})
+        if self.monitor.cancelacion_en_curso:
+            return _error(409, 'cancelacion_en_curso', 'Ya se está cancelando la reserva')
+        # Asíncrona, como la reserva: con la confirmación y los reintentos puede tardar
+        # más de lo que espera un cliente HTTP. El resultado llega por /api/eventos.
+        self.monitor.cancelacion_en_curso = True
+        asyncio.create_task(self.monitor.cancelar_reserva_api())
+        return web.json_response({'aceptada': True}, status=202)
 
     async def renovacion_parar(self, request):
         self.monitor.parar_auto_renovacion()
