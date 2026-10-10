@@ -1042,7 +1042,7 @@ class MonitorCargadores:
     
     async def toggle_pausa(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Pausa o reanuda los escaneos"""
-        self.scanning_paused = not self.scanning_paused
+        self.cambiar_pausa_escaneo(not self.scanning_paused)
         estado = "⏸️ PAUSADO" if self.scanning_paused else "▶️ ACTIVO"
         
         mensaje = f"🔄 *Estado del escaneo:* {estado}\n\n"
@@ -1903,6 +1903,8 @@ class MonitorCargadores:
 
     def cambiar_pausa_escaneo(self, pausado):
         self.scanning_paused = pausado
+        # Se guarda: si no, cada reinicio o despliegue reanudaba el escaneo sin avisar
+        self.set_config('scanning_paused', '1' if pausado else '0')
         self.publicar_estado()
 
     def reanudar_caza(self):
@@ -2413,8 +2415,10 @@ class MonitorCargadores:
         """Ejecuta el schedule de forma asíncrona"""
         # Primer chequeo tras un arranque aleatorio (no siempre a los 10s)
         await asyncio.sleep(self._rand.uniform(5, 20))
+        # El primer escaneo se hace aunque el escaneo esté en pausa: es una sola petición y
+        # sin él la app y el bot no tendrían ningún estado que enseñar hasta reanudarlo.
         print("🚀 Ejecutando primer chequeo...")
-        await self.chequear_cargadores()
+        await self.chequear_cargadores(forzar=True)
 
         amplitud = self.jitter_amplitude()
         print(f"⏰ Scheduler iniciado (cada {self.check_interval}s ±{amplitud:.0f}s)")
@@ -2455,6 +2459,9 @@ class MonitorCargadores:
         intervalo_guardado = self.get_config('check_interval')
         if intervalo_guardado:
             self.check_interval = int(intervalo_guardado)
+        if self.get_config('scanning_paused') == '1':
+            self.scanning_paused = True
+            print("⏸️ Escaneo automático en pausa (guardado)")
         caza_guardada = self.get_config('hunt_interval')
         if caza_guardada:
             self.hunt_interval = max(self.hunt_min_interval, int(caza_guardada))
