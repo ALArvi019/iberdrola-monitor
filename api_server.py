@@ -193,15 +193,19 @@ class ServidorAPI:
         m = self.monitor
         if m.reserva_en_curso:
             return _error(409, 'reserva_en_curso', 'Ya se está procesando una reserva')
+        # Se marca ya, antes de consultar a Iberdrola (que tarda), para que los clientes
+        # vean al instante que hay una reserva en marcha y para que dos peticiones
+        # seguidas no pasen las dos el control.
+        m.reserva_en_curso = True
+        m.publicar_estado()
         activa = await m.hay_reserva_activa()
-        if activa is None:
-            return _error(503, 'sin_sesion', 'No hay sesión de Iberdrola')
-        if activa:
+        if activa is None or activa:
+            m.reserva_en_curso = False
+            m.publicar_estado()
+            if activa is None:
+                return _error(503, 'sin_sesion', 'No hay sesión de Iberdrola')
             return _error(409, 'reserva_activa', 'Ya tienes una reserva activa.')
 
-        # Se marca antes de lanzar la tarea, para que dos peticiones seguidas no
-        # pasen las dos el control de arriba.
-        m.reserva_en_curso = True
         asyncio.create_task(m.reservar_api(cupr_id, socket_id))
         return web.json_response({'aceptada': True}, status=202)
 

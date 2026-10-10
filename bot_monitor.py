@@ -1508,6 +1508,7 @@ class MonitorCargadores:
         self._iniciar_auto_renovacion(cupr_id, socket_id)
         mensaje, buttons = self._mensaje_reserva_ok(result, cupr_id, socket_id, "🎉 *¡RESERVA EXITOSA!*")
         await query.edit_message_text(mensaje, parse_mode='Markdown', reply_markup=buttons)
+        asyncio.create_task(self.reescanear_tras_accion())
         return True
     
     async def _cancelar_reserva(self, query):
@@ -1537,6 +1538,7 @@ class MonitorCargadores:
             self.publicar('reserva', {'tipo': 'cancelada', 'mensaje': 'Reserva cancelada'})
             self.publicar_estado()
             await query.edit_message_text("✅ *Reserva cancelada correctamente*\n\n🔄 Auto-renovación detenida.", parse_mode='Markdown')
+            asyncio.create_task(self.reescanear_tras_accion())
         else:
             # Verificar si realmente se canceló
             transaction2 = self.api.get_transaction_in_progress(lat=self.latitude, lon=self.longitude)
@@ -1656,6 +1658,7 @@ class MonitorCargadores:
                         'proxima_renovacion': self._iso(self.auto_renew_next_time),
                     })
                 )
+                asyncio.create_task(self.reescanear_tras_accion())
             else:
                 print("   ❌ Error al renovar reserva")
                 self.auto_renew_active = False
@@ -1985,6 +1988,7 @@ class MonitorCargadores:
                 f"❌ *No se pudo reservar desde la app*\n\n{error}",
                 evento=('reserva', 'error', datos)
             )
+            await self.reescanear_tras_accion()
             return
 
         if self.hunt_task:
@@ -1994,6 +1998,17 @@ class MonitorCargadores:
             result, cupr_id, socket_id, "🎉 *¡RESERVA EXITOSA!* (desde la app)"
         )
         await self._send_notification(mensaje, reply_markup=buttons, evento=('reserva', 'ok', datos))
+        await self.reescanear_tras_accion()
+
+    async def reescanear_tras_accion(self):
+        """Escaneo inmediato tras reservar, cancelar o renovar.
+
+        El estado de los conectores solo cambia al escanear. Sin esto, tras una reserva
+        el cargador seguía saliendo libre hasta el siguiente escaneo, y nunca si el
+        escaneo automático estaba en pausa. Es una sola petición por acción.
+        """
+        await asyncio.sleep(2)  # Margen para que Iberdrola refleje el cambio
+        await self.chequear_cargadores(forzar=True)
 
     def parar_auto_renovacion(self):
         self.auto_renew_active = False
@@ -2018,6 +2033,7 @@ class MonitorCargadores:
             self.api.get_transaction_in_progress, lat=self.latitude, lon=self.longitude
         )
         cancelada = not (transaction and transaction.get('reservationInProgress'))
+        asyncio.create_task(self.reescanear_tras_accion())
         if cancelada:
             await self._send_notification(
                 "✅ *Reserva cancelada desde la app*\n\n🔄 Auto-renovación detenida.",
@@ -2287,6 +2303,8 @@ class MonitorCargadores:
             await self._send_notification(
                 mensaje, reply_markup=buttons, evento=('caza', 'reservado', self._datos_conector(con))
             )
+            # La caza ya no escanea (ha terminado): este escaneo enseña el conector reservado
+            asyncio.create_task(self.reescanear_tras_accion())
             return True
 
         self.hunt_failures += 1
