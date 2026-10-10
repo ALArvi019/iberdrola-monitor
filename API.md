@@ -65,6 +65,7 @@ Estado completo, sin llamar a Iberdrola: devuelve lo del último escaneo.
     "ultimo": "2026-10-10T11:02:01",
     "proximo": "2026-10-10T11:02:33"
   },
+  "tipo_preferido": "Mennekes",
   "conectores": [
     {
       "cuprId": 1234,
@@ -95,6 +96,8 @@ Estado completo, sin llamar a Iberdrola: devuelve lo del último escaneo.
 }
 ```
 
+* `tipo_preferido`: tipo de conector que se prefiere al reservar (la caza lo elige
+  primero). `null` si no hay preferencia.
 * `status`: `AVAILABLE`, `OCCUPIED`, `EV_CONNECTED`, `RESERVED`, `OUT_OF_SERVICE` o `UNKNOWN`.
 * `reserva` solo aparece en conectores `RESERVED`. `inicio` es `null` si el bot ya lo
   encontró reservado y no sabe desde cuándo. `fiable` es `false` si el bot estuvo parado
@@ -238,6 +241,7 @@ Cambios de estado en bruto, para gráficas (por ejemplo, a qué horas se libera 
 
 ```json
 {
+  "tipo_preferido": "Mennekes",
   "intervalo_escaneo": 30,
   "escaneo_pausado": false,
   "marcas_reserva": [13, 30],
@@ -245,7 +249,9 @@ Cambios de estado en bruto, para gráficas (por ejemplo, a qué horas se libera 
 }
 ```
 
-`PUT` acepta `intervalo_escaneo` (mínimo 30) y `escaneo_pausado`. Devuelve los ajustes.
+`PUT` acepta `intervalo_escaneo` (mínimo 30), `escaneo_pausado` y `tipo_preferido` (texto o
+`null` para quitar la preferencia, y manda sobre `PREFERRED_CONNECTOR_TYPE`). Devuelve los
+ajustes.
 
 ### `GET /api/eventos`
 

@@ -238,7 +238,7 @@ class ServidorAPI:
 
     async def ajustes_cambiar(self, request):
         datos = await self._json(request)
-        intervalo = pausado = None
+        intervalo = pausado = tipo = None
         # Se valida todo antes de aplicar nada, para no dejar un cambio a medias
         if 'intervalo_escaneo' in datos:
             intervalo = self._entero(datos['intervalo_escaneo'], 'intervalo_escaneo')
@@ -248,12 +248,18 @@ class ServidorAPI:
             pausado = datos['escaneo_pausado']
             if not isinstance(pausado, bool):
                 raise PeticionInvalida("'escaneo_pausado' tiene que ser true o false")
+        if 'tipo_preferido' in datos:
+            tipo = datos['tipo_preferido'] or ''
+            if not isinstance(tipo, str) or len(tipo) > 40:
+                raise PeticionInvalida("'tipo_preferido' tiene que ser un texto corto o null")
 
         m = self.monitor
         if intervalo is not None:
             m.cambiar_intervalo_escaneo(intervalo)
         if pausado is not None:
             m.cambiar_pausa_escaneo(pausado)
+        if tipo is not None:
+            m.cambiar_tipo_preferido(tipo)
         return web.json_response(m.ajustes_dict())
 
     async def eventos(self, request):

@@ -1268,7 +1268,7 @@ class MonitorCargadores:
         conectores = self.api.obtener_estado_conectores(cupr_ids_disponibles, lat=self.latitude, lon=self.longitude)
         
         if conectores:
-            preferred_type = os.getenv('PREFERRED_CONNECTOR_TYPE', '').strip()
+            preferred_type = self.tipo_preferido
             available = [c for c in conectores if c.get('status') == 'AVAILABLE']
 
             # Priorizar tipo preferido: primero los preferidos, luego el resto
@@ -1816,6 +1816,7 @@ class MonitorCargadores:
                 'proximo': None if self.scanning_paused else self._iso(self.next_scan_time),
             },
             'conectores': lista,
+            'tipo_preferido': self.tipo_preferido or None,
             'caza': self.caza_dict(),
             'mi_reserva': {
                 'auto_renovacion': self.auto_renew_active,
@@ -1871,8 +1872,21 @@ class MonitorCargadores:
             'anterior': f[4], 'nuevo': f[5], 'detectado': self._iso(self._parse_fecha(f[6])),
         } for f in filas]
 
+    @property
+    def tipo_preferido(self):
+        """Tipo de conector preferido al reservar. Lo que se haya guardado desde la app
+        manda sobre PREFERRED_CONNECTOR_TYPE. Cadena vacía si no hay preferencia."""
+        guardado = self.get_config('preferred_connector_type')
+        valor = guardado if guardado is not None else os.getenv('PREFERRED_CONNECTOR_TYPE', '')
+        return valor.strip()
+
+    def cambiar_tipo_preferido(self, tipo):
+        self.set_config('preferred_connector_type', (tipo or '').strip())
+        self.publicar_estado()
+
     def ajustes_dict(self):
         return {
+            'tipo_preferido': self.tipo_preferido or None,
             'intervalo_escaneo': self.check_interval,
             'escaneo_pausado': self.scanning_paused,
             'marcas_reserva': self.reservation_marks,
@@ -2236,7 +2250,7 @@ class MonitorCargadores:
 
     async def _caza_reservar(self, libres):
         """Intenta reservar el mejor conector libre. True si la caza ha terminado."""
-        preferred_type = os.getenv('PREFERRED_CONNECTOR_TYPE', '').strip().lower()
+        preferred_type = self.tipo_preferido.lower()
         if preferred_type:
             libres.sort(key=lambda c: 0 if c.get('socketType', '').lower() == preferred_type else 1)
         con = libres[0]
