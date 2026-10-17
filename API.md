@@ -123,20 +123,28 @@ menos de 10 segundos, devuelve ese sin llamar a Iberdrola.
   "escaneos": 12,
   "proximo": "2026-10-10T11:03:30",
   "hasta": "2026-10-10T14:00:00",
-  "fallos": 0
+  "fallos": 0,
+  "tipo": "Mennekes",
+  "tipos": ["Mennekes", "Schuko"]
 }
 ```
 
-`estado`: `inactiva`, `activa` o `pausada`.
+* `estado`: `inactiva`, `activa` o `pausada`.
+* `tipo`: tipo de conector que se caza. `null` para cualquiera. Se guarda y se usa en la
+  siguiente caza aunque se empiece desde Telegram.
+* `tipos`: tipos de conector vistos en el último escaneo, para elegir.
 
 ### `POST /api/caza`
 
-Empieza una caza. Cuerpo `{"intervalo": 60}` (opcional, segundos, no baja de
-`intervalo_min`). Devuelve la caza. `409 reserva_activa` si ya hay una reserva.
+Empieza una caza. Cuerpo `{"intervalo": 60, "tipo": "Mennekes"}`, los dos opcionales.
+`intervalo` en segundos, no baja de `intervalo_min`. `tipo` es uno de `tipos` o `null` para
+cualquiera, y si no viene se mantiene el de la última caza. Devuelve la caza.
+`409 reserva_activa` si ya hay una reserva.
 
 ### `PUT /api/caza`
 
-Cambia el intervalo de la caza en marcha: `{"intervalo": 120}`. `409 caza_inactiva` si no hay.
+Cambia la caza en marcha: `{"intervalo": 120}`, `{"tipo": "Schuko"}` o los dos.
+`409 caza_inactiva` si no hay.
 
 ### `POST /api/caza/pausar` · `POST /api/caza/reanudar`
 

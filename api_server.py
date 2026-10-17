@@ -46,7 +46,7 @@ class ServidorAPI:
         r.add_post('/api/escanear', self.escanear)
         r.add_get('/api/caza', self.caza)
         r.add_post('/api/caza', self.caza_empezar)
-        r.add_put('/api/caza', self.caza_intervalo)
+        r.add_put('/api/caza', self.caza_cambiar)
         r.add_delete('/api/caza', self.caza_cancelar)
         r.add_post('/api/caza/pausar', self.caza_pausar)
         r.add_post('/api/caza/reanudar', self.caza_reanudar)
@@ -139,11 +139,24 @@ class ServidorAPI:
     async def caza(self, request):
         return web.json_response(self.monitor.caza_dict())
 
+    def _tipo_caza(self, datos):
+        """Tipo pedido en el cuerpo: None si no viene, '' si viene a null (cualquiera)."""
+        if 'tipo' not in datos:
+            return None
+        tipo = datos['tipo']
+        if tipo is not None and not isinstance(tipo, str):
+            raise PeticionInvalida('tipo tiene que ser texto o null')
+        normalizado = self.monitor.normalizar_tipo_caza(tipo)
+        if normalizado is None:
+            raise PeticionInvalida(f'Tipo de conector desconocido: {tipo}')
+        return normalizado
+
     async def caza_empezar(self, request):
         datos = await self._json(request)
         intervalo = datos.get('intervalo')
         if intervalo is not None:
             intervalo = self._entero(intervalo, 'intervalo')
+        tipo = self._tipo_caza(datos)
 
         activa = await self.monitor.hay_reserva_activa()
         if activa is None:
@@ -151,15 +164,23 @@ class ServidorAPI:
         if activa:
             return _error(409, 'reserva_activa', 'Ya tienes una reserva activa, no hace falta cazar.')
 
-        await self.monitor.empezar_caza_api(intervalo)
+        await self.monitor.empezar_caza_api(intervalo, tipo)
         return web.json_response(self.monitor.caza_dict())
 
-    async def caza_intervalo(self, request):
+    async def caza_cambiar(self, request):
         datos = await self._json(request)
-        intervalo = self._entero(datos.get('intervalo'), 'intervalo')
+        intervalo = datos.get('intervalo')
+        if intervalo is not None:
+            intervalo = self._entero(intervalo, 'intervalo')
+        tipo = self._tipo_caza(datos)
+        if intervalo is None and tipo is None:
+            raise PeticionInvalida('Falta intervalo o tipo')
         if not self.monitor.hunt_task:
             return _error(409, 'caza_inactiva', 'No hay ninguna caza en marcha')
-        self.monitor.cambiar_intervalo_caza(intervalo)
+        if intervalo is not None:
+            self.monitor.cambiar_intervalo_caza(intervalo)
+        if tipo is not None:
+            self.monitor.cambiar_tipo_caza(tipo)
         return web.json_response(self.monitor.caza_dict())
 
     async def caza_pausar(self, request):

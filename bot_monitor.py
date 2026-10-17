@@ -88,6 +88,7 @@ class MonitorCargadores:
         self.hunt_next = None
         self.hunt_scans = 0
         self.hunt_failures = 0  # Intentos de reserva fallidos seguidos
+        self.hunt_tipo = ''  # Tipo de conector que se caza, vacío para cualquiera
 
         # Clientes conectados a /api/eventos, una cola por cliente
         self._suscriptores = set()
@@ -1816,7 +1817,24 @@ class MonitorCargadores:
             'proximo': self._iso(self.hunt_next) if self.hunt_task and not self.hunt_paused else None,
             'hasta': self._iso(self.hunt_until) if self.hunt_task else None,
             'fallos': self.hunt_failures,
+            'tipo': self.hunt_tipo or None,
+            'tipos': self.tipos_conector(),
         }
+
+    def tipos_conector(self):
+        return sorted({c.get('socketType') for c in self.last_conectores or [] if c.get('socketType')})
+
+    def normalizar_tipo_caza(self, tipo):
+        """Tipo de caza con el nombre exacto que da Iberdrola, o None si no existe.
+        Cadena vacía (cualquier tipo) se devuelve tal cual."""
+        tipo = (tipo or '').strip()
+        if not tipo:
+            return ''
+        tipos = self.tipos_conector()
+        if not tipos:
+            # Aún no hay escaneo con el que comparar: se acepta y se compara sin mayúsculas
+            return tipo
+        return next((t for t in tipos if t.lower() == tipo.lower()), None)
 
     def estado_dict(self):
         conectores = self.last_conectores or []
@@ -1945,6 +1963,11 @@ class MonitorCargadores:
         self.set_config('hunt_interval', self.hunt_interval)
         self.publicar_estado()
 
+    def cambiar_tipo_caza(self, tipo):
+        self.hunt_tipo = tipo
+        self.set_config('hunt_tipo', tipo)
+        self.publicar_estado()
+
     async def hay_reserva_activa(self):
         """Pregunta a Iberdrola si hay reserva propia. None si no hay sesión."""
         authenticated, _ = await self.ensure_authenticated()
@@ -1955,11 +1978,16 @@ class MonitorCargadores:
         )
         return bool(transaction and transaction.get('reservationInProgress'))
 
-    async def empezar_caza_api(self, intervalo=None):
+    async def empezar_caza_api(self, intervalo=None, tipo=None):
         self.hunt_interval = max(self.hunt_min_interval, intervalo or self.hunt_interval)
         self.set_config('hunt_interval', self.hunt_interval)
+        if tipo is not None:
+            self.hunt_tipo = tipo
+            self.set_config('hunt_tipo', tipo)
         self._arrancar_caza(datetime.now() + timedelta(minutes=self.hunt_max_minutes), pausada=False)
         texto = f"Caza iniciada desde la app, cada {self._formatear_segundos(self.hunt_interval)}"
+        if self.hunt_tipo:
+            texto += f", solo {self.hunt_tipo}"
         self.publicar('caza', {'tipo': 'iniciada', 'mensaje': texto})
         await self.enviar_mensaje(f"🎯 {texto}")
 
@@ -2168,6 +2196,7 @@ class MonitorCargadores:
         mensaje = f"🎯 *CAZA DE CARGADOR LIBRE*\n\nEstado: {estado}\n"
         if self.hunt_task:
             mensaje += f"⏱️ Intervalo: {self._formatear_segundos(self.hunt_interval)} (±{self._jitter(self.hunt_interval):.0f} s)\n"
+            mensaje += f"🔌 Busca: {self.hunt_tipo or 'cualquier conector'}\n"
             mensaje += f"🔍 Escaneos: {self.hunt_scans}\n"
             if self.hunt_next and not self.hunt_paused:
                 mensaje += f"⏭️ Próximo: {self.hunt_next.strftime('%H:%M:%S')}\n"
@@ -2292,7 +2321,8 @@ class MonitorCargadores:
                     espera = espera_error
                 else:
                     espera_error = None
-                    libres = [c for c in conectores if c.get('status') == 'AVAILABLE']
+                    libres = [c for c in conectores if c.get('status') == 'AVAILABLE'
+                              and self._tipo_cazado(c)]
                     if libres:
                         if await self._caza_reservar(libres):
                             return
@@ -2301,6 +2331,9 @@ class MonitorCargadores:
                 if not self.hunt_task or self.hunt_paused:
                     continue
                 self.hunt_next = datetime.now() + timedelta(seconds=espera)
+                # El escaneo ya publicó el estado, pero con la hora del próximo aún sin
+                # calcular, y si se reutilizó el del escaneo periódico no publicó nada.
+                self.publicar_estado()
                 await self._dormir_caza(espera)
         except asyncio.CancelledError:
             pass
@@ -2310,6 +2343,9 @@ class MonitorCargadores:
             await self._send_notification(
                 f"❌ *Caza detenida por un error*\n\n{str(e)[:200]}", evento=('caza', 'fallo')
             )
+
+    def _tipo_cazado(self, con):
+        return not self.hunt_tipo or con.get('socketType', '').lower() == self.hunt_tipo.lower()
 
     async def _escaneo_caza(self):
         """Estado de los conectores para una vuelta de la caza.
@@ -2531,6 +2567,7 @@ class MonitorCargadores:
         caza_guardada = self.get_config('hunt_interval')
         if caza_guardada:
             self.hunt_interval = max(self.hunt_min_interval, int(caza_guardada))
+        self.hunt_tipo = self.get_config('hunt_tipo') or ''
         
         # Crear aplicación
         self.app = Application.builder().token(self.bot_token).build()
