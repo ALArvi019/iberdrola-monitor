@@ -4,8 +4,6 @@ services:
     container_name: iberdrola-monitor
     restart: unless-stopped
     environment:
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - DEVICE_ID=${DEVICE_ID}
       - LATITUDE=${LATITUDE}
       - LONGITUDE=${LONGITUDE}

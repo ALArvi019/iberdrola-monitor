@@ -1,10 +1,10 @@
 # API HTTP
 
-El monitor expone una API HTTP para clientes propios (por ejemplo una app móvil). Corre en
-el mismo proceso que el bot, así que comparte su estado: escaneo, caza, reserva y
-histórico. Telegram sigue funcionando igual.
+El monitor se maneja con esta API HTTP desde un cliente propio (por ejemplo una app móvil).
+Corre en el mismo proceso que el monitor, así que comparte su estado: escaneo, caza, reserva
+e histórico. Los avisos (cambios, caza, reserva) llegan por [eventos](#get-apieventos).
 
-Está desactivada salvo que se defina `API_TOKEN`. Escucha en `API_PORT` (8090 por defecto)
+Sin `API_TOKEN` no arranca, y entonces el monitor no tiene forma de manejarse. Escucha en `API_PORT` (8090 por defecto)
 dentro del contenedor, sin TLS: está pensada para publicarse detrás de un proxy inverso que
 ponga el TLS, y conviene que ese proxy exija además certificado de cliente (mTLS). Ver
 [Publicación detrás de un proxy](#publicación-detrás-de-un-proxy).
@@ -105,10 +105,10 @@ Estado completo, sin llamar a Iberdrola: devuelve lo del último escaneo.
 * `tipo_preferido`: tipo de conector que se prefiere al reservar (la caza lo elige
   primero). `null` si no hay preferencia.
 * `status`: `AVAILABLE`, `OCCUPIED`, `EV_CONNECTED`, `RESERVED`, `OUT_OF_SERVICE` o `UNKNOWN`.
-* `reserva` solo aparece en conectores `RESERVED`. `inicio` es `null` si el bot ya lo
-  encontró reservado y no sabe desde cuándo. `fiable` es `false` si el bot estuvo parado
+* `reserva` solo aparece en conectores `RESERVED`. `inicio` es `null` si el monitor ya lo
+  encontró reservado y no sabe desde cuándo. `fiable` es `false` si el monitor estuvo parado
   entre medias y la hora es aproximada.
-* `mi_reserva` sale del estado local del bot, sin consultar a Iberdrola. `proxima_renovacion`
+* `mi_reserva` sale del estado local del monitor, sin consultar a Iberdrola. `proxima_renovacion`
   es la hora real a la que empezará la siguiente renovación (ya con su variación aleatoria).
   `minuto_renovacion` es el minuto de la reserva en que se renueva este ciclo, que puede no
   coincidir con el modo (ver [Modos de renovación](#modos-de-renovación)). `en_curso` es
@@ -139,7 +139,7 @@ menos de 10 segundos, devuelve ese sin llamar a Iberdrola.
 
 * `estado`: `inactiva`, `activa` o `pausada`.
 * `tipo`: tipo de conector que se caza. `null` para cualquiera. Se guarda y se usa en la
-  siguiente caza aunque se empiece desde Telegram.
+  siguiente caza si no se indica otro.
 * `tipos`: tipos de conector vistos en el último escaneo, para elegir.
 
 ### `POST /api/caza`
@@ -294,13 +294,19 @@ Cambios de estado en bruto, para gráficas (por ejemplo, a qué horas se libera 
   "marcas_reserva": [13, 30],
   "renovacion_minutos": 14,
   "modo_renovacion": "gratis",
-  "modos_renovacion": {"gratis": 14, "pago": 29}
+  "modos_renovacion": {"gratis": 14, "pago": 29},
+  "version_iberdrola": "4.36.9"
 }
 ```
 
-`PUT` acepta `intervalo_escaneo` (mínimo 30), `escaneo_pausado`, `modo_renovacion` y `tipo_preferido` (texto o
-`null` para quitar la preferencia, y manda sobre `PREFERRED_CONNECTOR_TYPE`). Devuelve los
-ajustes.
+`PUT` acepta `intervalo_escaneo` (mínimo 30), `escaneo_pausado`, `modo_renovacion`,
+`version_iberdrola` y `tipo_preferido` (texto o `null` para quitar la preferencia, y manda
+sobre `PREFERRED_CONNECTOR_TYPE`). Devuelve los ajustes.
+
+`version_iberdrola` es la versión de la app de Iberdrola con la que se presenta el monitor
+(cabeceras `versionApp` y `User-Agent`). Iberdrola rechaza las versiones viejas, así que
+conviene mandarle la de la app instalada en el móvil cada vez que se actualiza. Formato
+`X.Y.Z`. Se guarda y manda sobre `IBERDROLA_APP_VERSION`.
 
 ### `GET /api/app/version` · `GET /api/app/apk`
 

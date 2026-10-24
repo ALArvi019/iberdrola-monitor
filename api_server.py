@@ -2,7 +2,7 @@
 """
 API HTTP del monitor para clientes propios (app móvil).
 
-Corre en el mismo bucle de asyncio que el bot y trabaja sobre su estado. El contrato
+Corre en el mismo bucle de asyncio que el monitor y trabaja sobre su estado. El contrato
 está en API.md. No pone TLS: se publica detrás de un proxy inverso que lo ponga y que
 además exija certificado de cliente.
 """
@@ -319,7 +319,7 @@ class ServidorAPI:
 
     async def ajustes_cambiar(self, request):
         datos = await self._json(request)
-        intervalo = pausado = tipo = modo = None
+        intervalo = pausado = tipo = modo = version = None
         # Se valida todo antes de aplicar nada, para no dejar un cambio a medias
         if 'intervalo_escaneo' in datos:
             intervalo = self._entero(datos['intervalo_escaneo'], 'intervalo_escaneo')
@@ -338,10 +338,17 @@ class ServidorAPI:
             modo = datos['modo_renovacion']
             if modo not in self.monitor.MODOS_RENOVACION:
                 raise PeticionInvalida("'modo_renovacion' tiene que ser 'gratis' o 'pago'")
+        if 'version_iberdrola' in datos:
+            version = datos['version_iberdrola']
+            if not isinstance(version, str) or not self.monitor.VERSION_IBERDROLA.match(version.strip()):
+                raise PeticionInvalida("'version_iberdrola' tiene que ser X.Y.Z, por ejemplo 4.36.9")
+            version = version.strip()
 
         m = self.monitor
         if modo is not None:
             m.cambiar_modo_renovacion(modo)
+        if version is not None and version != m.app_version:
+            m.cambiar_version_iberdrola(version)
         if intervalo is not None:
             m.cambiar_intervalo_escaneo(intervalo)
         if pausado is not None:
