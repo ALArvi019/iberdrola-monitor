@@ -10,7 +10,9 @@ además exija certificado de cliente.
 import asyncio
 import hmac
 import json
+import os
 from datetime import datetime
+from pathlib import Path
 
 from aiohttp import web
 
@@ -19,6 +21,9 @@ API_VERSION = "1"
 PULSO_SEGUNDOS = 15
 ESCANEO_MINIMO_SEGUNDOS = 10  # POST /api/escanear no llama a Iberdrola más a menudo
 INTERVALO_ESCANEO_MINIMO = 30
+# Versión publicada de la app: version.json y app.apk. Dentro de data para que se pueda
+# publicar una versión nueva sin tocar el contenedor.
+CARPETA_APP = Path(os.getenv('APP_UPDATES_DIR', '/app/data/app'))
 
 
 class PeticionInvalida(Exception):
@@ -54,10 +59,13 @@ class ServidorAPI:
         r.add_post('/api/reserva', self.reserva_crear)
         r.add_delete('/api/reserva', self.reserva_cancelar)
         r.add_delete('/api/reserva/renovacion', self.renovacion_parar)
+        r.add_post('/api/reserva/renovacion', self.renovacion_reanudar)
         r.add_get('/api/historial', self.historial)
         r.add_get('/api/cambios', self.cambios)
         r.add_get('/api/ajustes', self.ajustes)
         r.add_put('/api/ajustes', self.ajustes_cambiar)
+        r.add_get('/api/app/version', self.app_version)
+        r.add_get('/api/app/apk', self.app_apk)
         r.add_get('/api/eventos', self.eventos)
 
     async def iniciar(self):
@@ -126,6 +134,39 @@ class ServidorAPI:
 
     async def estado(self, request):
         return web.json_response(self.monitor.estado_dict())
+
+    @staticmethod
+    def _version_publicada():
+        """version.json de la app publicada, o None si no hay una completa."""
+        try:
+            datos = json.loads((CARPETA_APP / 'version.json').read_text())
+        except (OSError, ValueError):
+            return None
+        apk = CARPETA_APP / 'app.apk'
+        claves = ('version', 'version_code', 'sha256')
+        if not isinstance(datos, dict) or not all(datos.get(k) for k in claves) or not apk.is_file():
+            return None
+        return {
+            'version': str(datos['version']),
+            'version_code': int(datos['version_code']),
+            'sha256': str(datos['sha256']).lower(),
+            'tamano': apk.stat().st_size,
+            'notas': str(datos.get('notas') or ''),
+        }
+
+    async def app_version(self, request):
+        version = self._version_publicada()
+        if not version:
+            return _error(404, 'sin_version', 'No hay ninguna versión de la app publicada')
+        return web.json_response(version)
+
+    async def app_apk(self, request):
+        if not self._version_publicada():
+            return _error(404, 'sin_version', 'No hay ninguna versión de la app publicada')
+        return web.FileResponse(
+            CARPETA_APP / 'app.apk',
+            headers={'Content-Type': 'application/vnd.android.package-archive', 'Cache-Control': 'no-store'},
+        )
 
     async def escanear(self, request):
         m = self.monitor
@@ -246,6 +287,17 @@ class ServidorAPI:
         self.monitor.parar_auto_renovacion()
         return web.json_response({'ok': True})
 
+    async def renovacion_reanudar(self, request):
+        authenticated, _ = await self.monitor.ensure_authenticated()
+        if not authenticated:
+            return _error(503, 'sin_sesion', 'No hay sesión de Iberdrola')
+        codigo, mensaje = await self.monitor.reanudar_auto_renovacion()
+        if codigo == 'error_iberdrola':
+            return _error(502, codigo, mensaje)
+        if codigo:
+            return _error(409, codigo, mensaje)
+        return web.json_response({'ok': True, 'mensaje': mensaje})
+
     async def historial(self, request):
         try:
             limite = max(1, min(200, int(request.query.get('limite', 20))))
@@ -267,7 +319,7 @@ class ServidorAPI:
 
     async def ajustes_cambiar(self, request):
         datos = await self._json(request)
-        intervalo = pausado = tipo = None
+        intervalo = pausado = tipo = modo = None
         # Se valida todo antes de aplicar nada, para no dejar un cambio a medias
         if 'intervalo_escaneo' in datos:
             intervalo = self._entero(datos['intervalo_escaneo'], 'intervalo_escaneo')
@@ -282,7 +334,14 @@ class ServidorAPI:
             if not isinstance(tipo, str) or len(tipo) > 40:
                 raise PeticionInvalida("'tipo_preferido' tiene que ser un texto corto o null")
 
+        if 'modo_renovacion' in datos:
+            modo = datos['modo_renovacion']
+            if modo not in self.monitor.MODOS_RENOVACION:
+                raise PeticionInvalida("'modo_renovacion' tiene que ser 'gratis' o 'pago'")
+
         m = self.monitor
+        if modo is not None:
+            m.cambiar_modo_renovacion(modo)
         if intervalo is not None:
             m.cambiar_intervalo_escaneo(intervalo)
         if pausado is not None:

@@ -38,6 +38,9 @@ Siempre JSON con un código estable:
 | `caza_inactiva` | 409 | Se pide pausar, reanudar o cambiar una caza que no existe |
 | `sin_sesion` | 503 | No hay sesión de Iberdrola (falta usuario o el login falló) |
 | `error_iberdrola` | 502 | La API de Iberdrola no respondió |
+| `sin_version` | 404 | No hay ninguna versión de la app publicada |
+| `sin_reserva` | 409 | Se pide reanudar la renovación sin reserva activa |
+| `fuera_de_plazo` | 409 | La reserva está a punto de acabar y ya no da tiempo a renovarla |
 
 ## Fechas
 
@@ -92,6 +95,8 @@ Estado completo, sin llamar a Iberdrola: devuelve lo del último escaneo.
     "cuprId": 1234,
     "physicalSocketId": 5678,
     "proxima_renovacion": "2026-10-10T11:16:00",
+    "minuto_renovacion": 14,
+    "modo_renovacion": "gratis",
     "en_curso": false
   }
 }
@@ -103,7 +108,10 @@ Estado completo, sin llamar a Iberdrola: devuelve lo del último escaneo.
 * `reserva` solo aparece en conectores `RESERVED`. `inicio` es `null` si el bot ya lo
   encontró reservado y no sabe desde cuándo. `fiable` es `false` si el bot estuvo parado
   entre medias y la hora es aproximada.
-* `mi_reserva` sale del estado local del bot, sin consultar a Iberdrola. `en_curso` es
+* `mi_reserva` sale del estado local del bot, sin consultar a Iberdrola. `proxima_renovacion`
+  es la hora real a la que empezará la siguiente renovación (ya con su variación aleatoria).
+  `minuto_renovacion` es el minuto de la reserva en que se renueva este ciclo, que puede no
+  coincidir con el modo (ver [Modos de renovación](#modos-de-renovación)). `en_curso` es
   `true` mientras se procesa una reserva (pago pendiente). Para los detalles de la reserva
   real, `GET /api/reserva`.
 
@@ -206,6 +214,28 @@ como un evento `reserva` de tipo `cancelada` o `error`.
 
 Para la renovación automática sin cancelar la reserva. `{"ok": true}`.
 
+### `POST /api/reserva/renovacion`
+
+Vuelve a activar la renovación de la reserva en curso. Consulta a Iberdrola la reserva y
+cuándo empezó, y programa la renovación según el modo. Si ya ha pasado el plazo gratis, esta
+vez se renueva al final de la reserva. Devuelve `{"ok": true, "mensaje": "..."}`, o
+`409 sin_reserva`, `409 fuera_de_plazo` o `502 error_iberdrola`.
+
+### Modos de renovación
+
+La renovación cancela la reserva y la vuelve a hacer en el mismo conector, con un pago
+nuevo cada vez.
+
+* `gratis` (por defecto): renueva en el minuto 14, antes de los 15 en que Iberdrola devuelve
+  el euro al cancelar.
+* `pago`: renueva en el minuto 29, apurando la reserva de 30. El euro de cada reserva ya no
+  se devuelve, pero se pide aprobar el pago la mitad de veces.
+
+La renovación se adelanta al azar hasta 30 s, nunca se retrasa. Un cambio de modo se aplica
+al ciclo en marcha si aún llega a tiempo (de `pago` a `gratis` pasado el minuto 14 ya no
+llega, y ese ciclo sigue hasta el 29). La renovación en marcha se guarda y se retoma tras un
+reinicio del monitor si la reserva sigue activa.
+
 ### `GET /api/historial?limite=20`
 
 Reservas ajenas vistas, de la más reciente a la más antigua.
@@ -262,13 +292,32 @@ Cambios de estado en bruto, para gráficas (por ejemplo, a qué horas se libera 
   "intervalo_escaneo": 30,
   "escaneo_pausado": false,
   "marcas_reserva": [13, 30],
-  "renovacion_minutos": 14
+  "renovacion_minutos": 14,
+  "modo_renovacion": "gratis",
+  "modos_renovacion": {"gratis": 14, "pago": 29}
 }
 ```
 
-`PUT` acepta `intervalo_escaneo` (mínimo 30), `escaneo_pausado` y `tipo_preferido` (texto o
+`PUT` acepta `intervalo_escaneo` (mínimo 30), `escaneo_pausado`, `modo_renovacion` y `tipo_preferido` (texto o
 `null` para quitar la preferencia, y manda sobre `PREFERRED_CONNECTOR_TYPE`). Devuelve los
 ajustes.
+
+### `GET /api/app/version` · `GET /api/app/apk`
+
+Actualizaciones de la app, servidas por la propia API para que la app no tenga que estar
+publicada en ningún sitio. El monitor lee `version.json` y `app.apk` de `APP_UPDATES_DIR`
+(`/app/data/app` por defecto, es decir, `data/app` junto al compose) en cada petición, así
+que publicar una versión es copiar esos dos ficheros, sin reiniciar nada.
+
+`version.json`:
+
+```json
+{"version": "0.2.0", "version_code": 200, "sha256": "<sha256 del apk>", "notas": "Opcional"}
+```
+
+`GET /api/app/version` devuelve eso más `tamano` (bytes del APK), o `404 sin_version` si
+falta alguno de los dos ficheros. `GET /api/app/apk` descarga el APK. La app comprueba la
+huella antes de instalarlo.
 
 ### `GET /api/eventos`
 
@@ -287,7 +336,7 @@ pagar: hay que aprobar el 3DS), `reservado`, `fallo`, `terminada` (tiempo máxim
 `cancelada`, `retomada` (tras un reinicio).
 
 Tipos de `reserva`: `progreso`, `ok`, `error`, `renovada`, `renovacion_fallida`,
-`expirada`, `carga_iniciada`, `cancelada`.
+`expirada`, `carga_iniciada`, `cancelada`, `reanudada`.
 
 `mensaje` es un texto en español listo para mostrar en una notificación. Los eventos `caza`
 y `reserva` pueden llevar `cuprId`, `physicalSocketId`, `cuprName` y `socketType`.

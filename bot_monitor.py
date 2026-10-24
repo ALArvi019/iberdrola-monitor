@@ -4,6 +4,7 @@ Bot de Telegram para monitorizar cargadores Iberdrola
 Escanea periódicamente y notifica cambios de estado
 """
 
+import json
 import os
 import random
 import signal
@@ -123,8 +124,11 @@ class MonitorCargadores:
         self.auto_renew_cupr_id = None
         self.auto_renew_socket_id = None
         self.auto_renew_task = None
-        self.auto_renew_next_time = None  # Hora de próxima renovación
-        self.RENEW_INTERVAL_MINUTES = 14  # Cancelar y renovar cada 14 minutos (antes de los 15 min gratis)
+        self.auto_renew_base = None  # Cuándo se hizo la reserva que toca renovar
+        self.auto_renew_minutos = 14  # Minuto de la reserva en que se renueva en este ciclo
+        self.auto_renew_jitter = 0.0  # Segundos que se adelanta esta renovación
+        self.auto_renew_retry_at = None  # Reintento tras un fallo de Iberdrola
+        self.renew_mode = 'gratis'
 
         # Versión de la app (cargar desde DB si disponible)
         self.app_version = os.environ.get('IBERDROLA_APP_VERSION', '4.36.7')
@@ -1193,6 +1197,12 @@ class MonitorCargadores:
         elif query.data == 'stop_auto_renew':
             await self._stop_auto_renew(query)
 
+        elif query.data == 'resume_auto_renew':
+            await query.edit_message_text("⏳ Reanudando la renovación automática...")
+            codigo, texto = await self.reanudar_auto_renovacion()
+            # Si sale bien, el aviso ya llega como mensaje aparte
+            await query.edit_message_text(f"⚠️ {texto}" if codigo else "✅ Renovación automática reanudada")
+
         elif query.data.startswith('hunt_'):
             await self._callback_caza(query)
     
@@ -1363,9 +1373,10 @@ class MonitorCargadores:
         mensaje += f"📊 Estado: {status}\n"
         
         # Mostrar estado de auto-renovación
+        modo = 'gratis, antes de los 15 min' if self.renew_mode == 'gratis' else 'de pago, al final de la reserva'
         if self.auto_renew_active and self.auto_renew_next_time:
-            next_time_str = self.auto_renew_next_time.strftime('%H:%M')
-            mensaje += f"\n🔄 *Auto-renovación: ACTIVA*\n"
+            next_time_str = self.auto_renew_next_time.strftime('%H:%M:%S')
+            mensaje += f"\n🔄 *Auto-renovación: ACTIVA* ({modo})\n"
             mensaje += f"⏱️ Próxima: *{next_time_str}* (prepara 3DS)"
         else:
             mensaje += f"\n🔄 Auto-renovación: Inactiva"
@@ -1379,6 +1390,8 @@ class MonitorCargadores:
         # Agregar botón de cancelar auto-renovación si está activa
         if self.auto_renew_active:
             buttons.append([InlineKeyboardButton("🔄 Desactivar Renovación Automática", callback_data="stop_auto_renew")])
+        else:
+            buttons.append([InlineKeyboardButton("🔄 Reanudar Renovación Automática", callback_data="resume_auto_renew")])
         
         await update.message.reply_text(
             mensaje,
@@ -1453,16 +1466,138 @@ class MonitorCargadores:
             # No se sabe en qué punto falló: se trata como si ya se hubiera pagado
             return None, f"Error durante la reserva: {str(e)[:100]}", 'reserva'
 
-    def _iniciar_auto_renovacion(self, cupr_id: int, socket_id: int):
-        """Arranca la renovación automática de una reserva recién hecha."""
+    @property
+    def renew_minutes(self):
+        """Minuto de la reserva en que se renueva según el modo elegido."""
+        return self.MODOS_RENOVACION[self.renew_mode]
+
+    @property
+    def auto_renew_next_time(self):
+        """Hora real de la próxima renovación. Se calcula, así un cambio de modo la mueve."""
+        if not self.auto_renew_active or not self.auto_renew_base:
+            return None
+        if self.auto_renew_retry_at:
+            return self.auto_renew_retry_at
+        return self.auto_renew_base + timedelta(minutes=self.auto_renew_minutos, seconds=-self.auto_renew_jitter)
+
+    def _nuevo_ciclo_renovacion(self, base, minutos=None):
+        self.auto_renew_base = base
+        self.auto_renew_minutos = minutos or self.renew_minutes
+        # El jitter solo adelanta: pasarse del límite del modo no es seguro. Si la reserva
+        # viene de antes (al reanudar), no puede dejar la hora ya pasada.
+        restante = (base + timedelta(minutes=self.auto_renew_minutos) - datetime.now()).total_seconds()
+        self.auto_renew_jitter = self._rand.uniform(0, max(0.0, min(30.0, restante - 10)))
+        self.auto_renew_retry_at = None
+        self._guardar_auto_renovacion()
+
+    def _guardar_auto_renovacion(self):
+        """Persiste la renovación para retomarla si el contenedor se reinicia."""
+        if self.auto_renew_active and self.auto_renew_base:
+            self.set_config('auto_renew', json.dumps({
+                'cupr': self.auto_renew_cupr_id, 'socket': self.auto_renew_socket_id,
+                'base': self.auto_renew_base.isoformat(), 'minutos': self.auto_renew_minutos,
+            }))
+        else:
+            self.set_config('auto_renew', '')
+
+    def _desactivar_auto_renovacion(self):
+        self.auto_renew_active = False
+        self._guardar_auto_renovacion()
+
+    def _iniciar_auto_renovacion(self, cupr_id: int, socket_id: int, base=None, minutos=None):
+        """Arranca la renovación automática. base es cuándo se hizo la reserva (ahora si
+        acaba de hacerse) y minutos el minuto de esa reserva en que renovarla."""
         self.auto_renew_active = True
         self.auto_renew_cupr_id = cupr_id
         self.auto_renew_socket_id = socket_id
-        self.auto_renew_next_time = datetime.now() + timedelta(minutes=self.RENEW_INTERVAL_MINUTES)
+        self._nuevo_ciclo_renovacion(base or datetime.now(), minutos)
         if self.auto_renew_task:
             self.auto_renew_task.cancel()
         self.auto_renew_task = asyncio.create_task(self._auto_renew_loop())
         self.publicar_estado()
+
+    def _minuto_para_reanudar(self, inicio, preferido=None):
+        """Minuto en que renovar una reserva hecha en inicio, o None si ya no da tiempo.
+
+        Pasado el plazo gratis, la cancelación ya no devuelve el euro, así que lo mejor
+        es apurar la reserva y renovarla al final, como en el modo de pago."""
+        margen = timedelta(seconds=20)
+        for minutos in (preferido or self.renew_minutes, self.MODOS_RENOVACION['pago']):
+            if inicio + timedelta(minutes=minutos) - margen > datetime.now():
+                return minutos
+        return None
+
+    async def reanudar_auto_renovacion(self):
+        """Vuelve a activar la renovación de la reserva en curso.
+
+        Devuelve (codigo, mensaje): codigo None si ha ido bien, o el error."""
+        if self.auto_renew_active:
+            return None, 'La renovación automática ya está activa.'
+        transaction = await asyncio.to_thread(
+            self.api.get_transaction_in_progress, lat=self.latitude, lon=self.longitude
+        )
+        if transaction is None:
+            return 'error_iberdrola', 'Iberdrola no responde.'
+        if not transaction.get('reservationInProgress'):
+            return 'sin_reserva', 'No tienes ninguna reserva activa.'
+        reservation = await asyncio.to_thread(
+            self.api.get_user_reservation, lat=self.latitude, lon=self.longitude
+        )
+        inicio = self._parse_fecha((reservation or {}).get('startDate'))
+        if not inicio:
+            return 'error_iberdrola', 'Iberdrola no dice cuándo empezó la reserva.'
+        minutos = self._minuto_para_reanudar(inicio)
+        if minutos is None:
+            return 'fuera_de_plazo', 'La reserva está a punto de acabar, ya no da tiempo a renovarla.'
+        self._iniciar_auto_renovacion(
+            transaction.get('cuprId'), transaction.get('physicalSocketId'), base=inicio, minutos=minutos
+        )
+        texto = f"Renovación automática reanudada. Próxima a las {self.auto_renew_next_time.strftime('%H:%M:%S')}"
+        if minutos != self.renew_minutes:
+            texto += ". Ya no da tiempo a renovarla gratis, así que esta vez se renueva al final de la reserva"
+        self.publicar('reserva', {'tipo': 'reanudada', 'mensaje': texto})
+        await self.enviar_mensaje(f"🔄 {texto}.")
+        return None, texto
+
+    def cambiar_modo_renovacion(self, modo):
+        self.renew_mode = modo
+        self.set_config('renew_mode', modo)
+        if self.auto_renew_active and self.auto_renew_base:
+            # El ciclo en marcha cambia solo si aún llega a la hora del modo nuevo. De pago a
+            # gratis pasado el minuto 14 ya no se puede cancelar gratis: sigue hasta el final.
+            nuevo = self.MODOS_RENOVACION[modo]
+            if self.auto_renew_base + timedelta(minutes=nuevo, seconds=-self.auto_renew_jitter - 20) > datetime.now():
+                self.auto_renew_minutos = nuevo
+                self._guardar_auto_renovacion()
+        self.publicar_estado()
+
+    async def _retomar_auto_renovacion(self):
+        """Al arrancar, retoma la renovación que había antes del reinicio."""
+        try:
+            guardada = json.loads(self.get_config('auto_renew') or 'null')
+        except ValueError:
+            guardada = None
+        if not guardada:
+            return
+        inicio = self._parse_fecha(guardada.get('base'))
+        minutos = self._minuto_para_reanudar(inicio, guardada.get('minutos')) if inicio else None
+        if minutos is None:
+            self.set_config('auto_renew', '')
+            return
+        transaction = await asyncio.to_thread(
+            self.api.get_transaction_in_progress, lat=self.latitude, lon=self.longitude
+        )
+        if not transaction or not transaction.get('reservationInProgress'):
+            # Sin respuesta tampoco se retoma: renovar a ciegas puede costar un pago
+            print("🔄 No se retoma la renovación: no hay reserva activa o Iberdrola no responde")
+            self.set_config('auto_renew', '')
+            return
+        self._iniciar_auto_renovacion(guardada['cupr'], guardada['socket'], base=inicio, minutos=minutos)
+        await self._send_notification(
+            "🔄 *Renovación automática retomada tras el reinicio*\n\n"
+            f"⏱️ Próxima: *{self.auto_renew_next_time.strftime('%H:%M:%S')}*",
+            evento=('reserva', 'reanudada')
+        )
 
     def _mensaje_reserva_ok(self, result, cupr_id: int, socket_id: int, cabecera: str):
         """Texto y botones de una reserva hecha, con la auto-renovación ya activa."""
@@ -1483,11 +1618,11 @@ class MonitorCargadores:
         mensaje += f"💰 Precio: 1€\n\n"
         mensaje += "🔄 *Auto-renovación ACTIVA*\n"
         mensaje += f"⏱️ Próxima renovación: *{next_renew_str}*\n"
-        mensaje += f"(cada {self.RENEW_INTERVAL_MINUTES} min)\n\n"
+        mensaje += f"(cada {self.renew_minutes} min)\n\n"
         mensaje += "📱 Prepara tu app bancaria para aprobar el 3DS."
 
         # Botón para activar timer, 1 min antes para prepararse
-        timer_minutes = self.RENEW_INTERVAL_MINUTES - 1
+        timer_minutes = self.renew_minutes - 1
         timer_url = f"https://www.google.com/search?q=set+timer+{timer_minutes}+minutes"
         buttons = InlineKeyboardMarkup([[InlineKeyboardButton(f"⏱️ Poner timer {timer_minutes} min", url=timer_url)]])
         return mensaje, buttons
@@ -1518,7 +1653,7 @@ class MonitorCargadores:
         await query.edit_message_text("⏳ Cancelando reserva...")
         
         # Detener auto-renovación
-        self.auto_renew_active = False
+        self._desactivar_auto_renovacion()
         if self.auto_renew_task:
             self.auto_renew_task.cancel()
             self.auto_renew_task = None
@@ -1552,7 +1687,7 @@ class MonitorCargadores:
         await query.edit_message_text("⏳ Desactivando renovación automática...")
         
         # Detener auto-renovación
-        self.auto_renew_active = False
+        self._desactivar_auto_renovacion()
         if self.auto_renew_task:
             self.auto_renew_task.cancel()
             self.auto_renew_task = None
@@ -1566,17 +1701,20 @@ class MonitorCargadores:
     
     async def _auto_renew_loop(self):
         """Loop de auto-renovación de reservas"""
-        print(f"🔄 Auto-renovación iniciada (cada {self.RENEW_INTERVAL_MINUTES} minutos)")
+        print(f"🔄 Auto-renovación iniciada (cada {self.renew_minutes} minutos)")
         
-        reintento = None  # Segundos hasta reintentar si Iberdrola no respondió
         while self.auto_renew_active:
-            # Esperar el intervalo de renovación. El jitter aquí solo resta
-            # tiempo: adelantarse es seguro, pasarse de los 15 min gratis no.
-            await asyncio.sleep(reintento or (self.RENEW_INTERVAL_MINUTES * 60 - self._rand.uniform(0, 30)))
-            reintento = None
-            
+            # La hora publicada es la de verdad, porque la app avisa un minuto antes para que
+            # estés pendiente del pago. Se espera a trozos porque un cambio de modo la mueve.
+            self.publicar_estado()
+            while self.auto_renew_active:
+                restante = (self.auto_renew_next_time - datetime.now()).total_seconds()
+                if restante <= 0:
+                    break
+                await asyncio.sleep(min(restante, 5))
             if not self.auto_renew_active:
                 break
+            self.auto_renew_retry_at = None
             
             print(f"🔄 Iniciando renovación automática...")
             
@@ -1593,13 +1731,13 @@ class MonitorCargadores:
                 await asyncio.sleep(5)
             if transaction is None:
                 print("⚠️ Iberdrola no responde. Se reintenta la renovación en 30 s.")
-                reintento = 30
+                self.auto_renew_retry_at = datetime.now() + timedelta(seconds=30)
                 continue
             
             if transaction and transaction.get('chargeInProgress'):
                 # Ya está cargando, detener auto-renovación
                 print("🔌 Carga en progreso detectada. Deteniendo auto-renovación.")
-                self.auto_renew_active = False
+                self._desactivar_auto_renovacion()
                 await self._send_notification(
                     "🔌 *Carga iniciada*\n\n"
                     "Auto-renovación detenida porque el vehículo está cargando.",
@@ -1610,7 +1748,7 @@ class MonitorCargadores:
             if not transaction or not transaction.get('reservationInProgress'):
                 # No hay reserva activa (expiró o se canceló externamente)
                 print("⚠️ No hay reserva activa. Deteniendo auto-renovación.")
-                self.auto_renew_active = False
+                self._desactivar_auto_renovacion()
                 await self._send_notification(
                     "⚠️ *Reserva expirada*\n\n"
                     "La reserva ya no está activa. Auto-renovación detenida.",
@@ -1627,7 +1765,7 @@ class MonitorCargadores:
             # de que el hueco lo coja otro.
             if not await self._cancelar_y_confirmar(cupr_id, socket_id, intentos=2):
                 print("❌ No se pudo confirmar la cancelación. La reserva sigue, sin renovar.")
-                self.auto_renew_active = False
+                self._desactivar_auto_renovacion()
                 await self._send_notification(
                     "⚠️ *No se pudo renovar*\n\n"
                     "Iberdrola no confirmó la cancelación de la reserva actual, así que sigue activa "
@@ -1650,7 +1788,7 @@ class MonitorCargadores:
             
             if not socket_available:
                 print("❌ Socket ya no disponible. Deteniendo auto-renovación.")
-                self.auto_renew_active = False
+                self._desactivar_auto_renovacion()
                 await self._send_notification(
                     "❌ *Socket no disponible*\n\n"
                     "El cargador ya no está disponible. Auto-renovación detenida.",
@@ -1664,11 +1802,11 @@ class MonitorCargadores:
             
             if success:
                 print("   ✅ Reserva renovada correctamente")
-                self.auto_renew_next_time = datetime.now() + timedelta(minutes=self.RENEW_INTERVAL_MINUTES)
+                self._nuevo_ciclo_renovacion(datetime.now())
                 next_renew_str = self.auto_renew_next_time.strftime('%H:%M')
                 
                 # Crear botón de timer
-                timer_minutes = self.RENEW_INTERVAL_MINUTES - 1
+                timer_minutes = self.renew_minutes - 1
                 timer_url = f"https://www.google.com/search?q=set+timer+{timer_minutes}+minutes"
                 timer_buttons = InlineKeyboardMarkup([[
                     InlineKeyboardButton(f"⏱️ Timer {timer_minutes} min", url=timer_url)
@@ -1688,7 +1826,7 @@ class MonitorCargadores:
                 asyncio.create_task(self.reescanear_tras_accion())
             else:
                 print("   ❌ Error al renovar reserva")
-                self.auto_renew_active = False
+                self._desactivar_auto_renovacion()
                 await self._send_notification(
                     "❌ *Error al renovar reserva*\n\n"
                     "No se pudo renovar. Auto-renovación detenida.",
@@ -1870,6 +2008,9 @@ class MonitorCargadores:
                 'cuprId': self.auto_renew_cupr_id if self.auto_renew_active else None,
                 'physicalSocketId': self.auto_renew_socket_id if self.auto_renew_active else None,
                 'proxima_renovacion': self._iso(self.auto_renew_next_time) if self.auto_renew_active else None,
+                # Minuto de la reserva en que se renueva este ciclo (14 gratis, 29 de pago)
+                'minuto_renovacion': self.auto_renew_minutos if self.auto_renew_active else None,
+                'modo_renovacion': self.renew_mode,
                 'en_curso': self.reserva_en_curso,
             },
         }
@@ -1937,7 +2078,9 @@ class MonitorCargadores:
             'intervalo_escaneo': self.check_interval,
             'escaneo_pausado': self.scanning_paused,
             'marcas_reserva': self.reservation_marks,
-            'renovacion_minutos': self.RENEW_INTERVAL_MINUTES,
+            'renovacion_minutos': self.renew_minutes,
+            'modo_renovacion': self.renew_mode,
+            'modos_renovacion': self.MODOS_RENOVACION,
         }
 
     def cambiar_intervalo_escaneo(self, segundos):
@@ -2094,7 +2237,7 @@ class MonitorCargadores:
         return False
 
     def parar_auto_renovacion(self):
-        self.auto_renew_active = False
+        self._desactivar_auto_renovacion()
         if self.auto_renew_task:
             self.auto_renew_task.cancel()
             self.auto_renew_task = None
@@ -2151,6 +2294,10 @@ class MonitorCargadores:
     #   * se apaga sola a los HUNT_MAX_MINUTES.
 
     HUNT_INTERVAL_OPTIONS = (30, 45, 60, 120, 300)
+    # Minuto de la reserva en que se cancela y se vuelve a reservar. Gratis: antes de los 15
+    # min, cuando Iberdrola devuelve el euro al cancelar. Pago: se apura la reserva de 30
+    # min, y el euro de cada una ya no se devuelve.
+    MODOS_RENOVACION = {'gratis': 14, 'pago': 29}
     HUNT_MAX_BACKOFF = 600
 
     @staticmethod
@@ -2568,6 +2715,8 @@ class MonitorCargadores:
         if caza_guardada:
             self.hunt_interval = max(self.hunt_min_interval, int(caza_guardada))
         self.hunt_tipo = self.get_config('hunt_tipo') or ''
+        if self.get_config('renew_mode') in self.MODOS_RENOVACION:
+            self.renew_mode = self.get_config('renew_mode')
         
         # Crear aplicación
         self.app = Application.builder().token(self.bot_token).build()
@@ -2595,6 +2744,7 @@ class MonitorCargadores:
         # Iniciar scheduler como tarea asíncrona
         asyncio.create_task(self.run_schedule_loop())
         await self._retomar_caza()
+        await self._retomar_auto_renovacion()
         await self._iniciar_api()
         
         # Iniciar bot
